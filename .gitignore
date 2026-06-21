@@ -1,0 +1,28 @@
+# local development context, not published
+CLAUDE.md
+BUILD_STEPS.md
+PROMPTS.txt
+
+# self-hosted data source, cloned locally and not part of this repo
+vlrggapi/
+
+# generated local database (name finalized in step 2)
+*.db
+*.sqlite
+*.sqlite3
+
+# python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# virtual environments
+.venv/
+venv/
+env/
+
+# claude code local settings
+.claude/settings.local.json
+
+# os / editor cruft
+.DS_Store
