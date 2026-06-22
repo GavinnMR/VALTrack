@@ -14,11 +14,17 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from valtrack import db, eras, journal, queries, stats, veto
+from valtrack import db, eras, freshness, ingest, journal, queries, stats, veto
 from valtrack.window import DateWindow, EventFilter
 
 # A team is flagged stale once this many days pass with no match.
 STALE_DAYS = 42
+# The stored data is flagged stale once this many days pass since the last
+# refresh, nudging the user to pull new matches.
+STALE_REFRESH_DAYS = 7
+# Cap how many matches the in-app refresh details in one click, so the button
+# stays quick and never turns into the multi-hour full harvest.
+REFRESH_DETAIL_LIMIT = 100
 
 st.set_page_config(page_title="VALTrack", layout="wide")
 
@@ -784,6 +790,77 @@ def render_team(conn, column, team, window, five_only, events):
         render_roster(conn, team)
 
 
+def run_incremental_refresh():
+    """Pull new matches since the last update and detail the newest of them.
+
+    Reuses the ingestion engine in incremental scope (Build Steps 2 and 5), so it
+    stops at matches already stored and never runs the full all-time harvest. The
+    detail pass is capped so a click stays quick. The engine stamps last_updated
+    and last_status itself; on an API failure it records "failed" and raises,
+    which we surface as the API likely being down.
+    """
+    with st.status("Refreshing data (incremental)...", expanded=True) as status:
+        try:
+            status.write("Pulling new matches (cheap pass)...")
+            cheap = ingest.run_ingest(scope="incremental", progress=status.write)
+            status.write(
+                f"Found {cheap['matches']} new match rows across "
+                f"{cheap['teams']} teams."
+            )
+            status.write("Fetching detail for the newest matches...")
+            details = ingest.run_detail_ingest(
+                scope="incremental", limit=REFRESH_DETAIL_LIMIT,
+                progress=status.write,
+            )
+            status.update(label="Refresh complete", state="complete")
+            st.success(
+                f"Refreshed: {cheap['matches']} new match rows, "
+                f"{details['matches']} matches detailed."
+            )
+        except Exception as exc:
+            status.update(label="Refresh failed", state="error")
+            st.error(
+                f"Refresh failed: {exc}. The data API may be down. Start vlrggapi "
+                "(python main.py in the vlrggapi folder) and try again."
+            )
+
+
+def render_freshness(conn):
+    """Show the refresh button and the staleness banner in its two states.
+
+    One state warns that the stored data is older than the threshold (the user
+    has not refreshed recently); the other warns that the last refresh attempt
+    failed, so the API may be down. Both read the meta bookkeeping the ingestion
+    writes.
+    """
+    last_status = db.get_meta(conn, "last_status")
+    last_updated = db.get_meta(conn, "last_updated")
+    age = freshness.age_days(last_updated)
+
+    left, right = st.columns([1, 4])
+    with left:
+        if st.button("Refresh data", help="Incremental update, not the full harvest."):
+            run_incremental_refresh()
+    with right:
+        if last_status == "failed":
+            st.error(
+                "The most recent refresh attempt failed, so the data API may be "
+                "down. The stored data still works for viewing."
+            )
+        elif age is None:
+            st.warning("No refresh recorded yet. Click Refresh to pull new matches.")
+        elif age >= STALE_REFRESH_DAYS:
+            st.warning(
+                f"Stored data was last updated {age:.0f} days ago. Click Refresh "
+                "to pull newer matches."
+            )
+        else:
+            note = f"Data updated {age:.0f} days ago."
+            if last_status == "partial":
+                note += " The last refresh finished with some errors."
+            st.caption(note)
+
+
 def main():
     st.title("VALTrack")
     st.caption(
@@ -798,6 +875,9 @@ def main():
     conn = db.connect()
     db.ensure_app_tables(conn)
     try:
+        render_freshness(conn)
+        st.divider()
+
         teams = queries.list_teams(conn)
         if len(teams) < 2:
             st.warning("The database holds fewer than two teams. Run the harvest first.")
