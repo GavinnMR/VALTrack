@@ -1,10 +1,14 @@
-"""Tests for the read-side queries, focused on the overall record computation.
+"""Tests for the read-side queries.
 
-team_record is the one bit of aggregation in this step. The tricky part is that
-a franchise team can be stored in either match slot, so the record must hold up
-whether the team is team1 or team2, and must ignore matches that are not decided.
+team_record and the windowed match reads are the aggregation in this slice. The
+tricky parts: a franchise team can be stored in either match slot, the date
+window must filter correctly, and form and recent history must read each result
+from the team's own point of view.
 """
+from datetime import date
+
 from valtrack import db
+from valtrack.window import DateWindow
 
 
 def _fresh_conn(tmp_path):
@@ -13,13 +17,29 @@ def _fresh_conn(tmp_path):
     return db.connect(path)
 
 
-def _add_match(conn, match_id, t1_id, t2_id, t1_score, t2_score):
+def _add_match(conn, match_id, t1_id, t2_id, t1_score, t2_score, match_date=None):
     conn.execute(
         """
-        INSERT INTO matches (match_id, team1_id, team2_id, team1_score, team2_score)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO matches (match_id, team1_id, team2_id,
+                             team1_score, team2_score, date)
+        VALUES (?, ?, ?, ?, ?, ?)
         """,
-        (match_id, t1_id, t2_id, t1_score, t2_score),
+        (match_id, t1_id, t2_id, t1_score, t2_score, match_date),
+    )
+
+
+def _add_named_match(conn, match_id, t1_id, t1_name, t2_id, t2_name,
+                     t1_score, t2_score, match_date, rnd="R1",
+                     t1_tag=None, t2_tag=None):
+    conn.execute(
+        """
+        INSERT INTO matches (match_id, date, event_round,
+            team1_id, team1_name, team1_tag, team1_score,
+            team2_id, team2_name, team2_tag, team2_score)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (match_id, match_date, rnd, t1_id, t1_name, t1_tag, t1_score,
+         t2_id, t2_name, t2_tag, t2_score),
     )
 
 
@@ -77,4 +97,75 @@ def test_record_is_zero_for_team_with_no_matches(tmp_path):
     conn = _fresh_conn(tmp_path)
     rec = team_record(conn, 999)
     assert rec == {"wins": 0, "losses": 0, "decided": 0}
+    conn.close()
+
+
+def test_record_respects_window(tmp_path):
+    from valtrack.queries import team_record
+
+    conn = _fresh_conn(tmp_path)
+    me, opp = 100, 200
+    _add_match(conn, 1, me, opp, 2, 0, "2024-01-10")   # win, in range
+    _add_match(conn, 2, me, opp, 0, 2, "2024-02-10")   # loss, in range
+    _add_match(conn, 3, me, opp, 2, 1, "2023-12-01")   # win, before range
+    _add_match(conn, 4, me, opp, 2, 1, "2024-09-01")   # win, after range
+    conn.commit()
+
+    w = DateWindow(date(2024, 1, 1), date(2024, 6, 30))
+    assert team_record(conn, me, w) == {"wins": 1, "losses": 1, "decided": 2}
+    # All time still sees everything.
+    assert team_record(conn, me) == {"wins": 3, "losses": 1, "decided": 4}
+    conn.close()
+
+
+def test_decided_results_newest_first_and_windowed(tmp_path):
+    from valtrack.queries import decided_results
+
+    conn = _fresh_conn(tmp_path)
+    me, opp = 100, 200
+    _add_match(conn, 1, me, opp, 2, 0, "2024-01-10")       # W
+    _add_match(conn, 2, opp, me, 2, 0, "2024-02-10")       # L (me is team2)
+    _add_match(conn, 3, me, opp, 1, 1, "2024-03-10")       # tie, excluded
+    _add_match(conn, 4, me, opp, None, None, "2024-04-10")  # undecided, excluded
+    _add_match(conn, 5, me, opp, 2, 1, "2024-05-10")       # W
+    conn.commit()
+
+    assert decided_results(conn, me) == ["W", "L", "W"]
+    w = DateWindow(date(2024, 2, 1), None)
+    assert decided_results(conn, me, w) == ["W", "L"]
+    conn.close()
+
+
+def test_recent_matches_perspective_and_limit(tmp_path):
+    from valtrack.queries import recent_matches
+
+    conn = _fresh_conn(tmp_path)
+    me, opp = 100, 200
+    _add_named_match(conn, 1, me, "Me", opp, "Them", 2, 0, "2024-01-10", t2_tag="THM")
+    _add_named_match(conn, 2, opp, "Them", me, "Me", 2, 1, "2024-02-10", t1_tag="THM")
+    conn.commit()
+
+    rec = recent_matches(conn, me, limit=10)
+    # Newest first, framed from me's point of view.
+    assert rec[0]["match_id"] == 2
+    assert rec[0]["opponent"] == "Them"
+    assert rec[0]["opponent_tag"] == "THM"
+    assert rec[0]["score"] == (1, 2)   # me is team2 with 1, opponent has 2
+    assert rec[0]["result"] == "L"
+    assert rec[1]["opponent"] == "Them"
+    assert rec[1]["score"] == (2, 0)
+    assert rec[1]["result"] == "W"
+    assert len(recent_matches(conn, me, limit=1)) == 1
+    conn.close()
+
+
+def test_match_date_bounds(tmp_path):
+    from valtrack.queries import match_date_bounds
+
+    conn = _fresh_conn(tmp_path)
+    assert match_date_bounds(conn) == (None, None)
+    _add_match(conn, 1, 100, 200, 2, 0, "2024-03-01")
+    _add_match(conn, 2, 100, 200, 2, 0, "2022-06-15")
+    conn.commit()
+    assert match_date_bounds(conn) == ("2022-06-15", "2024-03-01")
     conn.close()
