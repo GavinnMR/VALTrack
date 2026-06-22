@@ -13,7 +13,7 @@ import datetime as dt
 import pandas as pd
 import streamlit as st
 
-from valtrack import db, queries, stats
+from valtrack import db, queries, stats, veto
 from valtrack.window import DateWindow
 
 st.set_page_config(page_title="VALTrack", layout="wide")
@@ -322,6 +322,117 @@ def _pvp_side(player):
     }
 
 
+def _team_map_splits(conn, team, window):
+    """Per-map splits for a team keyed by map name, for the win-rate payoff."""
+    table = stats.per_map_splits(
+        queries.team_map_results(conn, team["id"], window),
+        queries.team_rounds(conn, team["id"], window),
+        team["name"],
+    )
+    return {m["map_name"]: m for m in table}
+
+
+def render_veto_reconstruction(conn, team_a, team_b, window):
+    """Reconstruct the likely map pool for the two teams and show map win rates.
+
+    Aggregates each team's veto tendencies over the window, infers the active map
+    pool, and reconstructs the probable picks, decider, and bans. For the maps
+    likely to be played it then surfaces each team's map win rate with attack and
+    defense side splits (from Build Step 6). This is built from veto history, not
+    a real upcoming veto, and it makes no claim about who wins the match.
+    """
+    st.header("Veto and map-pool reconstruction")
+    a_tend = veto.team_tendencies(
+        queries.team_vetos(conn, team_a["id"], window), team_a["tag"]
+    )
+    b_tend = veto.team_tendencies(
+        queries.team_vetos(conn, team_b["id"], window), team_b["tag"]
+    )
+    pool = veto.active_pool(a_tend, b_tend)
+    if not pool:
+        st.caption(
+            "No veto data stored in this range for these teams. Run the detail "
+            "harvest (python harvest.py --pass details) to populate it."
+        )
+        st.divider()
+        return
+    rec = veto.reconstruct(a_tend, b_tend, pool)
+
+    a_pick = rec["a_pick"] or "-"
+    b_pick = rec["b_pick"] or "-"
+    decider = rec["decider"] or "-"
+    c1, c2, c3 = st.columns(3)
+    c1.metric(f"{team_a['name']} likely pick", a_pick)
+    c2.metric(f"{team_b['name']} likely pick", b_pick)
+    c3.metric("Probable decider", decider)
+    if rec["likely_bans"]:
+        st.caption("Likely bans: " + ", ".join(rec["likely_bans"]))
+
+    played = set(rec["likely_played"])
+    tags = {}
+    if rec["a_pick"]:
+        tags[rec["a_pick"]] = f"{team_a['tag'] or 'A'} pick"
+    if rec["b_pick"]:
+        tags.setdefault(rec["b_pick"], f"{team_b['tag'] or 'B'} pick")
+    if rec["decider"]:
+        tags.setdefault(rec["decider"], "decider")
+    pool_rows = []
+    for r in rec["rows"]:
+        pool_rows.append({
+            "Map": r["map"],
+            "Likely": tags.get(r["map"], "ban"),
+            f"{team_a['tag'] or 'A'} pick%": pct(r["a_pick_rate"]),
+            f"{team_a['tag'] or 'A'} ban%": pct(r["a_ban_rate"]),
+            f"{team_b['tag'] or 'B'} pick%": pct(r["b_pick_rate"]),
+            f"{team_b['tag'] or 'B'} ban%": pct(r["b_ban_rate"]),
+            "Play likelihood": f"{r['play_score']:+.2f}",
+        })
+    st.dataframe(pd.DataFrame(pool_rows), hide_index=True)
+
+    st.subheader("Win rates on the likely-played maps")
+    a_splits = _team_map_splits(conn, team_a, window)
+    b_splits = _team_map_splits(conn, team_b, window)
+    if not a_splits and not b_splits:
+        st.caption(
+            "No per-map detail stored in this range yet, so map win rates are not "
+            "available. They fill in as the detail harvest runs."
+        )
+    else:
+        def split_cells(splits, map_name):
+            m = splits.get(map_name)
+            if not m:
+                return ("-", "-", "-")
+            decided = m["won"] + m["lost"]
+            win = pct(m["map_winrate"]) if decided else "-"
+            return (f"{win} ({m['won']}-{m['lost']})",
+                    pct(m["atk_winrate"]), pct(m["def_winrate"]))
+
+        win_rows = []
+        for map_name in rec["likely_played"]:
+            a_win, a_atk, a_def = split_cells(a_splits, map_name)
+            b_win, b_atk, b_def = split_cells(b_splits, map_name)
+            win_rows.append({
+                "Map": map_name,
+                f"{team_a['tag'] or 'A'} map%": a_win,
+                f"{team_a['tag'] or 'A'} ATK": a_atk,
+                f"{team_a['tag'] or 'A'} DEF": a_def,
+                f"{team_b['tag'] or 'B'} map%": b_win,
+                f"{team_b['tag'] or 'B'} ATK": b_atk,
+                f"{team_b['tag'] or 'B'} DEF": b_def,
+            })
+        st.dataframe(pd.DataFrame(win_rows), hide_index=True)
+
+    st.caption(
+        "Reconstructed from each team's veto history in the selected range, not "
+        "an actual upcoming veto. The pool is inferred from the maps seen most in "
+        "that history (narrow the date range for the current rotation). Play "
+        "likelihood is each team's pick rate minus ban rate, summed; it ranks "
+        "maps, it does not predict the match winner. Pick and ban rates are over "
+        "the matches each map was in the pool."
+    )
+    st.divider()
+
+
 def render_player_vs_player(conn, team_a, team_b, window):
     """Align the two rosters by inferred role and compare player against player.
 
@@ -485,6 +596,8 @@ def main():
             st.warning("Pick two different teams to compare.")
 
         st.divider()
+        render_veto_reconstruction(conn, team_a, team_b, window)
+
         show_left, show_right = st.columns(2)
         render_team(conn, show_left, team_a, window)
         render_team(conn, show_right, team_b, window)

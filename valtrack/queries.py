@@ -313,6 +313,30 @@ def team_player_stats(conn, team_id, window=None):
     ).fetchall()
 
 
+def team_vetos(conn, team_id, window=None):
+    """Return the stored veto actions for matches this team played, windowed.
+
+    One row per veto action (ban, pick, or remains) across the team's matches,
+    in match and sequence order: match_id, seq, team_token, action, map_name. The
+    team can be in either match slot, so both are checked. The date filter is on
+    the parent match. Feeds valtrack.veto.team_tendencies, which resolves the tag
+    token and filters to real maps. Returns [] when the team has no veto data.
+    """
+    window = window or DateWindow.all_time()
+    wclause, wparams = window.clause("m.date")
+    return conn.execute(
+        f"""
+        SELECT v.match_id, v.seq, v.team_token, v.action, v.map_name
+        FROM match_vetos v
+        JOIN matches m ON m.match_id = v.match_id
+        WHERE (m.team1_id = ? OR m.team2_id = ?)
+          AND {wclause}
+        ORDER BY v.match_id, v.seq
+        """,
+        [team_id, team_id, *wparams],
+    ).fetchall()
+
+
 def match_date_bounds(conn):
     """Return (min_date, max_date) ISO strings across stored matches.
 
