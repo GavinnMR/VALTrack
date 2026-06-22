@@ -53,6 +53,37 @@ def init_db(db_path=DB_PATH):
         conn.close()
 
 
+# The local-only tables that hold user input (notes and the matchup log). The
+# app writes these itself, so they must exist even on a database harvested before
+# they were added. The app does not run the full schema, so it ensures just these
+# on startup. Kept in sync with schema.sql.
+_APP_TABLES_SQL = """
+CREATE TABLE IF NOT EXISTS matchup_notes (
+    pair_key   TEXT PRIMARY KEY,
+    body       TEXT,
+    updated_at TEXT
+);
+CREATE TABLE IF NOT EXISTS matchup_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    team_a_id   INTEGER,
+    team_a_name TEXT,
+    team_b_id   INTEGER,
+    team_b_name TEXT,
+    note        TEXT,
+    confidence  TEXT,
+    outcome     TEXT,
+    created_at  TEXT,
+    resolved_at TEXT
+);
+"""
+
+
+def ensure_app_tables(conn):
+    """Create the local notes and matchup-log tables if missing. Idempotent."""
+    conn.executescript(_APP_TABLES_SQL)
+    conn.commit()
+
+
 def set_meta(conn, key, value):
     """Upsert a single key/value bookkeeping row."""
     conn.execute(

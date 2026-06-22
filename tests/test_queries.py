@@ -301,6 +301,41 @@ def test_team_player_stats_joins_round_count_and_windows(tmp_path):
     conn.close()
 
 
+def test_common_opponents(tmp_path):
+    from valtrack.queries import common_opponents
+
+    conn = _fresh_conn(tmp_path)
+    _add_team(conn, 100, "Alpha")
+    _add_team(conn, 200, "Beta")
+    # Alpha (100) and Beta (200) both played Gamma (300); only Alpha played Delta.
+    _add_named_match(conn, 1, 100, "Alpha", 300, "Gamma", 2, 0, "2024-01-10")  # A beat Gamma
+    _add_named_match(conn, 2, 300, "Gamma", 100, "Alpha", 2, 1, "2024-02-10")  # A lost to Gamma
+    _add_named_match(conn, 3, 200, "Beta", 300, "Gamma", 0, 2, "2024-03-10")   # B lost to Gamma
+    _add_named_match(conn, 4, 100, "Alpha", 400, "Delta", 2, 0, "2024-04-10")  # only Alpha
+    # Alpha also played Beta directly; the other selected team is not a common opp.
+    _add_named_match(conn, 5, 100, "Alpha", 200, "Beta", 2, 0, "2024-05-10")
+    conn.commit()
+
+    common = common_opponents(conn, 100, 200)
+    assert [c["opponent"] for c in common] == ["Gamma"]  # Delta and Beta excluded
+    gamma = common[0]
+    assert gamma["a"] == {"wins": 1, "losses": 1}  # Alpha 1-1 vs Gamma
+    assert gamma["b"] == {"wins": 0, "losses": 1}  # Beta 0-1 vs Gamma
+    conn.close()
+
+
+def test_last_match_date(tmp_path):
+    from valtrack.queries import last_match_date
+
+    conn = _fresh_conn(tmp_path)
+    _add_match(conn, 1, 100, 200, 2, 0, "2024-03-01")
+    _add_match(conn, 2, 200, 100, 2, 1, "2024-06-15")  # 100 in team2 slot
+    conn.commit()
+    assert last_match_date(conn, 100) == "2024-06-15"
+    assert last_match_date(conn, 999) is None
+    conn.close()
+
+
 def test_match_date_bounds(tmp_path):
     from valtrack.queries import match_date_bounds
 

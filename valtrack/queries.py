@@ -381,6 +381,69 @@ def team_vetos(conn, team_id, window=None):
     ).fetchall()
 
 
+def _opponent_records(conn, team_id, window, events):
+    """A team's decided record against each opponent, keyed by opponent name."""
+    window = window or DateWindow.all_time()
+    events = events or EventFilter()
+    wclause, wparams = window.clause("date")
+    eclause, eparams = events.clause("event_name")
+    rows = conn.execute(
+        f"""
+        SELECT
+            CASE WHEN team1_id = ? THEN team2_name ELSE team1_name END AS opponent,
+            CASE WHEN team1_id = ?
+                 THEN (CASE WHEN team1_score > team2_score THEN 'W' ELSE 'L' END)
+                 ELSE (CASE WHEN team2_score > team1_score THEN 'W' ELSE 'L' END)
+            END AS result
+        FROM matches
+        WHERE (team1_id = ? OR team2_id = ?)
+          AND team1_score IS NOT NULL
+          AND team2_score IS NOT NULL
+          AND team1_score != team2_score
+          AND {wclause}
+          AND {eclause}
+        """,
+        [team_id, team_id, team_id, team_id, *wparams, *eparams],
+    ).fetchall()
+    recs = {}
+    for r in rows:
+        opp = r["opponent"]
+        if not opp:
+            continue
+        agg = recs.setdefault(opp, {"wins": 0, "losses": 0})
+        if r["result"] == "W":
+            agg["wins"] += 1
+        else:
+            agg["losses"] += 1
+    return recs
+
+
+def common_opponents(conn, team_a_id, team_b_id, window=None, events=None):
+    """Opponents both teams have faced, with each team's record against them.
+
+    Most useful across regions, where the two teams rarely meet but may share
+    results against the same third teams. Each team's own name and the other
+    selected team are excluded, since the point is a shared third opponent.
+    Returns a list of {opponent, a, b} where a and b are {wins, losses}, ordered
+    by the combined number of decided matches so the best-sampled rows lead.
+    """
+    a = _opponent_records(conn, team_a_id, window, events)
+    b = _opponent_records(conn, team_b_id, window, events)
+    a_name = _team_name(conn, team_a_id)
+    b_name = _team_name(conn, team_b_id)
+    excluded = {a_name, b_name}
+    out = []
+    for opp in set(a) & set(b):
+        if opp in excluded:
+            continue
+        out.append({"opponent": opp, "a": a[opp], "b": b[opp]})
+    out.sort(
+        key=lambda x: -(x["a"]["wins"] + x["a"]["losses"]
+                        + x["b"]["wins"] + x["b"]["losses"])
+    )
+    return out
+
+
 def last_match_date(conn, team_id):
     """The team's most recent match date over all stored matches, or None.
 

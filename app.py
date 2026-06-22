@@ -14,7 +14,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from valtrack import db, eras, queries, stats, veto
+from valtrack import db, eras, journal, queries, stats, veto
 from valtrack.window import DateWindow, EventFilter
 
 # A team is flagged stale once this many days pass with no match.
@@ -561,6 +561,104 @@ def render_player_vs_player(conn, team_a, team_b, window, five_only):
     )
 
 
+def render_common_opponents(conn, team_a, team_b, window, events):
+    """Opponents both teams have faced, with each team's record against them."""
+    st.divider()
+    st.header("Common opponents")
+    common = queries.common_opponents(
+        conn, team_a["id"], team_b["id"], window, events
+    )
+    if not common:
+        st.caption(
+            "No opponents both teams have faced in this range and event type. "
+            "This is common for teams in different regions over a short window."
+        )
+        return
+    rows = []
+    for c in common:
+        a, b = c["a"], c["b"]
+        a_decided, b_decided = a["wins"] + a["losses"], b["wins"] + b["losses"]
+        rows.append({
+            "Opponent": c["opponent"],
+            f"{team_a['tag'] or 'A'} record": f"{a['wins']}-{a['losses']}",
+            f"{team_a['tag'] or 'A'} win%": pct(a["wins"] / a_decided) if a_decided else "-",
+            f"{team_b['tag'] or 'B'} record": f"{b['wins']}-{b['losses']}",
+            f"{team_b['tag'] or 'B'} win%": pct(b["wins"] / b_decided) if b_decided else "-",
+        })
+    st.dataframe(pd.DataFrame(rows), hide_index=True)
+    st.caption(
+        "Decided results against opponents both teams have played in the selected "
+        "range and event type. Most useful across regions, where the two rarely "
+        "meet but share third opponents. These are different opponents and events, "
+        "so read them as context, not a head-to-head."
+    )
+
+
+def render_notes(conn, team_a, team_b):
+    """A free-text note saved locally for this team pair."""
+    st.divider()
+    st.subheader("Notes")
+    key = f"note_{journal._pair_key(team_a['id'], team_b['id'])}"
+    if key not in st.session_state:
+        st.session_state[key] = journal.get_note(conn, team_a["id"], team_b["id"])
+    st.text_area(
+        "Your observations on this matchup", key=key, height=120,
+        help="Free text the data does not capture. Stored locally for this pair.",
+    )
+    if st.button("Save note"):
+        journal.save_note(conn, team_a["id"], team_b["id"], st.session_state[key])
+        st.success("Note saved.")
+    st.caption("Stored locally for this team pair. Never scraped, never sent anywhere.")
+
+
+def render_matchup_log(conn, team_a, team_b):
+    """Record a matchup with a pre-match note and confidence, resolve it later."""
+    st.divider()
+    st.header("Matchup log")
+    with st.form("matchup_log_form", clear_on_submit=True):
+        st.write(f"Log this matchup: {team_a['name']} vs {team_b['name']}")
+        note = st.text_area("Pre-match note", key="log_note_input")
+        confidence = st.select_slider(
+            "Confidence",
+            options=["very low", "low", "medium", "high", "very high"],
+            value="medium",
+        )
+        if st.form_submit_button("Add to log"):
+            journal.add_log_entry(
+                conn, team_a["id"], team_a["name"], team_b["id"], team_b["name"],
+                note, confidence,
+            )
+            st.success("Added to the log.")
+
+    entries = journal.list_log_entries(conn)
+    if not entries:
+        st.caption("No log entries yet. Add one above to start tracking your calls.")
+        return
+    st.subheader(f"Past entries ({len(entries)})")
+    for e in entries:
+        with st.container(border=True):
+            created = (e["created_at"] or "")[:10]
+            st.write(
+                f"**{e['team_a_name']} vs {e['team_b_name']}** "
+                f"({created}), confidence: {e['confidence']}"
+            )
+            if e["note"]:
+                st.write(e["note"])
+            if e["outcome"]:
+                resolved = (e["resolved_at"] or "")[:10]
+                st.caption(f"Outcome: {e['outcome']} (recorded {resolved})")
+            else:
+                outcome = st.text_input(
+                    "Record the actual outcome", key=f"log_outcome_{e['id']}"
+                )
+                if st.button("Save outcome", key=f"log_resolve_{e['id']}"):
+                    if outcome.strip():
+                        journal.resolve_log_entry(conn, e["id"], outcome.strip())
+                        st.rerun()
+                    else:
+                        st.warning("Enter an outcome before saving.")
+
+
 def render_recent(conn, team, window, events):
     st.divider()
     st.subheader("Recent matches")
@@ -698,6 +796,7 @@ def main():
         return
 
     conn = db.connect()
+    db.ensure_app_tables(conn)
     try:
         teams = queries.list_teams(conn)
         if len(teams) < 2:
@@ -768,6 +867,9 @@ def main():
         render_team(conn, show_right, team_b, window, five_only, events)
 
         render_player_vs_player(conn, team_a, team_b, window, five_only)
+        render_common_opponents(conn, team_a, team_b, window, events)
+        render_notes(conn, team_a, team_b)
+        render_matchup_log(conn, team_a, team_b)
     finally:
         conn.close()
 
