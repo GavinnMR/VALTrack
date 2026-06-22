@@ -313,6 +313,38 @@ def team_player_stats(conn, team_id, window=None):
     ).fetchall()
 
 
+def player_appearances(conn, team_id, window=None):
+    """When each player appeared for this team, from stored per-map detail.
+
+    The transactions endpoint is unreliable, so roster change history is derived
+    from who actually played: one row per player who has a map for this team in
+    the window, with their first and last appearance date and their map count.
+    Newest last appearance first, so the current names surface at the top.
+    Resolves the team id to the detail-page name like the other detail queries.
+    """
+    name = _team_name(conn, team_id)
+    if name is None:
+        return []
+    window = window or DateWindow.all_time()
+    wclause, wparams = window.clause("m.date")
+    return conn.execute(
+        f"""
+        SELECT mps.player_name,
+               MIN(m.date) AS first_date,
+               MAX(m.date) AS last_date,
+               COUNT(DISTINCT mps.match_id) AS matches,
+               COUNT(*) AS maps
+        FROM map_player_stats mps
+        JOIN matches m ON m.match_id = mps.match_id
+        WHERE mps.team_name = ?
+          AND {wclause}
+        GROUP BY mps.player_name
+        ORDER BY last_date DESC, maps DESC
+        """,
+        [name, *wparams],
+    ).fetchall()
+
+
 def team_vetos(conn, team_id, window=None):
     """Return the stored veto actions for matches this team played, windowed.
 

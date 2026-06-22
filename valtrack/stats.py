@@ -89,6 +89,32 @@ def classify_roster(rows):
     return {"mains": mains, "subs": subs, "staff": staff}
 
 
+def current_five_names(roster_rows):
+    """The casefolded aliases of a team's current five, for filtering by player.
+
+    Takes the same stored roster rows classify_roster reads and returns just the
+    main players' aliases, lowercased so a name match against the detail tables
+    is case insensitive. Stand-ins and staff are left out, since the filter is
+    meant to narrow stats to the five who currently start.
+    """
+    mains = classify_roster(roster_rows)["mains"]
+    return {(m["alias"] or "").casefold() for m in mains if m["alias"]}
+
+
+def keep_players(rows, names):
+    """Filter per-player rows to a set of casefolded player names.
+
+    Used by the current-five toggle: when `names` is given, only rows whose
+    player_name is in the set survive, so the aggregations downstream see just
+    those players. When `names` is None the rows pass through unchanged, so the
+    toggle off path costs nothing. A name not in the detail tables simply drops
+    out, which is honest rather than inventing a line for a player with no maps.
+    """
+    if names is None:
+        return rows
+    return [r for r in rows if (r["player_name"] or "").casefold() in names]
+
+
 def map_winrates(map_rows, team_name):
     """Per-map win record for one team from stored map results.
 

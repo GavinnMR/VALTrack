@@ -194,18 +194,21 @@ def render_pistol(conn, team, window):
     )
 
 
-def render_opening(conn, team, window):
+def render_opening(conn, team, window, five_names=None):
     """Team and per-player opening-duel win rates with attack and defense splits.
 
     Computed from the per-map first-kill and first-death counts in the stored
     detail, so it only has figures where per-match detail has been harvested. The
     counts are per-map totals, not per-round events, so the split is over the
     opening duels taken on each side rather than a round-by-round timeline. The
-    duel counts are shown so a thin sample stays visible.
+    duel counts are shown so a thin sample stays visible. When five_names is set
+    the figures are narrowed to the current five.
     """
     st.divider()
     st.subheader("Opening duels")
-    rows = queries.team_player_opening(conn, team["id"], window)
+    rows = stats.keep_players(
+        queries.team_player_opening(conn, team["id"], window), five_names
+    )
     o = stats.opening_duels(rows, team["name"])
     if o["duels"] == 0:
         st.caption(
@@ -264,7 +267,7 @@ def pct100(value):
     return f"{value:.0f}%" if value is not None else "-"
 
 
-def render_player_stats(conn, team, window):
+def render_player_stats(conn, team, window, five_names=None):
     """Per-player aggregated statistics for the window, with a per-agent view.
 
     Computed from the stored per-map player lines, so it only has figures where
@@ -272,11 +275,14 @@ def render_player_stats(conn, team, window):
     headshot percentage) are round-weighted across the player's maps; K/D and the
     per-round figures are summed then divided. Maps and rounds are shown as the
     sample size. Clutch statistics are not shown: the data source does not expose
-    them, so they are left out rather than guessed.
+    them, so they are left out rather than guessed. When five_names is set the
+    table is narrowed to the current five.
     """
     st.divider()
     st.subheader("Player statistics")
-    rows = queries.team_player_stats(conn, team["id"], window)
+    rows = stats.keep_players(
+        queries.team_player_stats(conn, team["id"], window), five_names
+    )
     players = stats.player_aggregates(rows, team["name"])
     if not players:
         st.caption(
@@ -460,22 +466,31 @@ def render_veto_reconstruction(conn, team_a, team_b, window):
     st.divider()
 
 
-def render_player_vs_player(conn, team_a, team_b, window):
+def render_player_vs_player(conn, team_a, team_b, window, five_only):
     """Align the two rosters by inferred role and compare player against player.
 
     Each player's role is inferred from their agent usage (see valtrack.agents),
     then the two teams are paired within each role. The headline figures, rating,
     ACS, K/D, KAST, and opening-duel win rate, are shown mirrored so like lines up
     against like. Built on the same windowed per-map detail as the per-team
-    sections, so it only has figures where detail has been harvested.
+    sections, so it only has figures where detail has been harvested. When the
+    current-five filter is on, each roster is narrowed to its five.
     """
     st.divider()
     st.header("Player versus player")
+    a_names = current_five_set(conn, team_a) if five_only else None
+    b_names = current_five_set(conn, team_b) if five_only else None
     a_players = stats.player_aggregates(
-        queries.team_player_stats(conn, team_a["id"], window), team_a["name"]
+        stats.keep_players(
+            queries.team_player_stats(conn, team_a["id"], window), a_names
+        ),
+        team_a["name"],
     )
     b_players = stats.player_aggregates(
-        queries.team_player_stats(conn, team_b["id"], window), team_b["name"]
+        stats.keep_players(
+            queries.team_player_stats(conn, team_b["id"], window), b_names
+        ),
+        team_b["name"],
     )
     pairs = stats.align_rosters(a_players, b_players)
     if not pairs:
@@ -562,7 +577,46 @@ def render_roster(conn, team):
     )
 
 
-def render_team(conn, column, team, window):
+def current_five_set(conn, team):
+    """The casefolded current-five names for a team, for the player filter."""
+    return stats.current_five_names(queries.get_roster(conn, team["id"]))
+
+
+def render_roster_timeline(conn, team, window):
+    """Show when each player appeared, so roster changes over the range show.
+
+    Derived from who actually played (the transactions endpoint is unreliable),
+    so it is an appearance timeline rather than official join and leave dates.
+    Players not in the current five are marked, which is the point: an all-time
+    window can span several rosters, and this makes that visible.
+    """
+    st.divider()
+    st.subheader("Roster timeline")
+    rows = queries.player_appearances(conn, team["id"], window)
+    if not rows:
+        st.caption("No per-map detail stored in this range, so no appearances.")
+        return
+    five = current_five_set(conn, team)
+    table = []
+    for r in rows:
+        in_five = (r["player_name"] or "").casefold() in five
+        table.append({
+            "Player": r["player_name"],
+            "On current five": "yes" if in_five else "no",
+            "First seen": r["first_date"],
+            "Last seen": r["last_date"],
+            "Maps": r["maps"],
+        })
+    st.dataframe(pd.DataFrame(table), hide_index=True)
+    st.caption(
+        "Appearances from stored matches, not official transactions. A player "
+        "marked not on the current five is a former player or stand-in whose "
+        "games are still in an all-time window, which is why the current-five "
+        "filter exists."
+    )
+
+
+def render_team(conn, column, team, window, five_only):
     """Render one team's full comparison column."""
     with column:
         st.header(team["name"])
@@ -575,12 +629,14 @@ def render_team(conn, column, team, window):
         if team["logo"]:
             st.image(team["logo"], width=80)
 
+        five_names = current_five_set(conn, team) if five_only else None
         render_record_and_form(conn, team, window)
         render_snapshot(team)
         render_map_splits(conn, team, window)
         render_pistol(conn, team, window)
-        render_opening(conn, team, window)
-        render_player_stats(conn, team, window)
+        render_opening(conn, team, window, five_names)
+        render_player_stats(conn, team, window, five_names)
+        render_roster_timeline(conn, team, window)
         render_recent(conn, team, window)
         render_roster(conn, team)
 
@@ -617,6 +673,15 @@ def main():
             )
 
         window = choose_window(conn)
+        five_only = st.checkbox(
+            "Current five only (player figures)",
+            help=(
+                "Narrows the player statistics, opening duels, and player-versus-"
+                "player view to each team's current five. Team, map, and round "
+                "figures stay over everyone who played, since a past round cannot "
+                "be reassigned to the current roster."
+            ),
+        )
 
         team_a = queries.get_team(conn, teams[a]["id"])
         team_b = queries.get_team(conn, teams[b]["id"])
@@ -627,10 +692,10 @@ def main():
         render_veto_reconstruction(conn, team_a, team_b, window)
 
         show_left, show_right = st.columns(2)
-        render_team(conn, show_left, team_a, window)
-        render_team(conn, show_right, team_b, window)
+        render_team(conn, show_left, team_a, window, five_only)
+        render_team(conn, show_right, team_b, window, five_only)
 
-        render_player_vs_player(conn, team_a, team_b, window)
+        render_player_vs_player(conn, team_a, team_b, window, five_only)
     finally:
         conn.close()
 

@@ -7,8 +7,10 @@ survive VLR's unreliable staff flag and its occasionally mangled role text.
 from valtrack.stats import (
     align_rosters,
     classify_roster,
+    current_five_names,
     form_and_streak,
     is_small_sample,
+    keep_players,
     map_winrates,
     opening_duels,
     per_map_splits,
@@ -606,3 +608,30 @@ def test_align_rosters_preserves_input_order_within_role():
 
 def test_align_rosters_empty_both_sides():
     assert align_rosters([], []) == []
+
+
+# --- roster validity: current-five names and filtering (Build Step 13) -------
+
+def test_current_five_names_are_mains_casefolded():
+    rows = [
+        _row("Aspas"), _row("Less"), _row("pANcada", role="Wongstand-in"),
+        _row("Coach", role="head coach"),
+    ]
+    names = current_five_names(rows)
+    # Only the main players, lowercased; stand-in and staff excluded.
+    assert names == {"aspas", "less"}
+
+
+def test_keep_players_filters_by_name_set():
+    rows = [
+        {"player_name": "Aspas", "v": 1},
+        {"player_name": "Less", "v": 2},
+        {"player_name": "former", "v": 3},
+    ]
+    kept = keep_players(rows, {"aspas", "less"})
+    assert [r["v"] for r in kept] == [1, 2]
+
+
+def test_keep_players_none_passes_through():
+    rows = [{"player_name": "x"}]
+    assert keep_players(rows, None) is rows
