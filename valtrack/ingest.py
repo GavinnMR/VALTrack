@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from valtrack import db
 from valtrack.api_client import ApiError, VlrClient
 from valtrack.cleaning import fix_encoding, parse_date, parse_int, parse_score
-from valtrack.franchise import iter_franchise_teams
+from valtrack.franchise import LEAGUE_RANKING_REGIONS, iter_franchise_teams
 
 
 def _now():
@@ -39,6 +39,34 @@ def fetch_rankings(client, region):
             "last_played": fix_encoding(seg.get("last_played")),
         }
     return lookup
+
+
+def _get_region_rankings(client, cache, region):
+    """Return a region's ranking lookup, caching once. A ladder that cannot be
+    fetched is cached empty so one bad region does not abort a team."""
+    if region not in cache:
+        try:
+            cache[region] = fetch_rankings(client, region)
+        except ApiError:
+            cache[region] = {}
+    return cache[region]
+
+
+def resolve_ranking(client, cache, league, profile_name, fallback_name):
+    """Find a team's regional ranking across its league's ladders.
+
+    VLR splits a franchise league across several ranking ladders (see
+    LEAGUE_RANKING_REGIONS), so we search them in priority order and take the
+    first name match. Returns None for teams that sit on no ladder, which is the
+    honest result for inactive orgs rather than a fabricated rank.
+    """
+    keys = [profile_name.casefold(), fallback_name.casefold()]
+    for region in LEAGUE_RANKING_REGIONS.get(league, []):
+        lookup = _get_region_rankings(client, cache, region)
+        for key in keys:
+            if key in lookup:
+                return lookup[key]
+    return None
 
 
 def upsert_team(conn, league, region, profile, ranking):
@@ -213,24 +241,51 @@ def upsert_match(conn, source_team_id, match):
     return match_id
 
 
+def _is_real_match(match):
+    """Reject the junk segments the endpoint emits past the last real page.
+
+    Once paging runs off the end of a team's history, vlrggapi does not return
+    an empty page. It parses a nav link and emits placeholder segments whose
+    match_id is the team id and whose team names, date, and score are all empty.
+    A real played match always carries both team names, so that is the tell.
+    """
+    team1 = match.get("team1") or {}
+    team2 = match.get("team2") or {}
+    return bool(fix_encoding(team1.get("name"))) and bool(
+        fix_encoding(team2.get("name"))
+    )
+
+
 def ingest_team_matches(client, conn, team_id, scope, max_pages=100):
     """Page a team's match history and upsert rows.
 
     Full scope reads to the end. Incremental scope stops at the first match
     already stored, since the history is newest first. Returns the count of
     matches written or refreshed.
+
+    The endpoint does not signal the end with an empty page; past the last real
+    page it repeats placeholder junk (see _is_real_match). So we stop when a page
+    contributes no new real match, and also track ids seen this run to guard
+    against any clamped page that repeats real rows.
     """
     written = 0
+    seen = set()
     for page in range(1, max_pages + 1):
         data = client.team_matches(team_id, page=page)
         segments = data.get("segments", [])
         if not segments:
             break
 
+        new_this_page = 0
         hit_known = False
         for match in segments:
+            if not _is_real_match(match):
+                continue
             match_id = parse_int(match.get("match_id"))
-            if scope == "incremental" and match_id is not None:
+            if match_id is None or match_id in seen:
+                continue
+            seen.add(match_id)
+            if scope == "incremental":
                 exists = conn.execute(
                     "SELECT 1 FROM matches WHERE match_id = ?", (match_id,)
                 ).fetchone()
@@ -239,8 +294,12 @@ def ingest_team_matches(client, conn, team_id, scope, max_pages=100):
                     break
             if upsert_match(conn, team_id, match) is not None:
                 written += 1
+                new_this_page += 1
 
         if scope == "incremental" and hit_known:
+            break
+        # No new real match on a full page means we have run off the end.
+        if new_this_page == 0:
             break
     return written
 
@@ -284,10 +343,6 @@ def run_ingest(scope="full", client=None, db_path=db.DB_PATH, progress=print):
     try:
         for league, region, name, team_id in iter_franchise_teams():
             try:
-                if region not in rankings_cache:
-                    rankings_cache[region] = fetch_rankings(client, region)
-                ranking_lookup = rankings_cache[region]
-
                 data = client.team_profile(team_id)
                 segments = data.get("segments", [])
                 if not segments:
@@ -296,9 +351,15 @@ def run_ingest(scope="full", client=None, db_path=db.DB_PATH, progress=print):
                     continue
                 profile = segments[0]
 
-                ranking = ranking_lookup.get(
-                    fix_encoding(profile.get("name", "")).casefold()
-                ) or ranking_lookup.get(name.casefold())
+                ranking = resolve_ranking(
+                    client,
+                    rankings_cache,
+                    league,
+                    fix_encoding(profile.get("name", "")),
+                    name,
+                )
+                if ranking is None:
+                    summary["unresolved"].append(name)
 
                 upsert_team(conn, league, region, profile, ranking)
                 upsert_roster(conn, team_id, profile.get("roster", []))

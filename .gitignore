@@ -24,5 +24,8 @@ env/
 # claude code local settings
 .claude/settings.local.json
 
+# generated harvest logs
+*.log
+
 # os / editor cruft
 .DS_Store

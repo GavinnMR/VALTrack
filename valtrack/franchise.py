@@ -8,8 +8,14 @@ brittle against sponsor prefixes (DRX shows as "KIWOOM DRX") and inactive
 suffixes (eg "Apeks (inactive since ...)"). The ids here were verified against
 the live search endpoint.
 
-Leagues map to rankings region codes: americas->na, emea->eu, pacific->ap,
-china->cn.
+Each franchise league maps to a coarse home region code (LEAGUE_REGION), stored
+on the team row. Regional rankings are trickier: VLR's ranking ladders are more
+granular than the four leagues, so one league spans several ladders. The
+Americas league is split across North America, Brazil, and LATAM south; Pacific
+across Asia-Pacific, Korea, and Japan. LEAGUE_RANKING_REGIONS lists, per league,
+the ladders to search in priority order when resolving a team's regional rank.
+A few teams (KOI, Apeks, Talon) are inactive on VLR and sit on no ladder at all,
+so their regional rank stays null, which is the honest answer.
 """
 
 LEAGUE_REGION = {
@@ -17,6 +23,13 @@ LEAGUE_REGION = {
     "emea": "eu",
     "pacific": "ap",
     "china": "cn",
+}
+
+LEAGUE_RANKING_REGIONS = {
+    "americas": ["na", "br", "la-s", "la-n"],
+    "emea": ["eu"],
+    "pacific": ["ap", "kr", "jp", "oce"],
+    "china": ["cn"],
 }
 
 # league -> list of (display name, VLR.gg team id)
