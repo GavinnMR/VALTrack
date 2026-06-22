@@ -1,12 +1,7 @@
-# local development context, not published
-CLAUDE.md
-BUILD_STEPS.md
-PROMPTS.txt
-
 # self-hosted data source, cloned locally and not part of this repo
 vlrggapi/
 
-# generated local database (name finalized in step 2)
+# generated local database
 *.db
 *.sqlite
 *.sqlite3
@@ -20,9 +15,6 @@ __pycache__/
 .venv/
 venv/
 env/
-
-# claude code local settings
-.claude/settings.local.json
 
 # generated harvest logs
 *.log
