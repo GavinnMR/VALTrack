@@ -183,6 +183,69 @@ def recent_matches(conn, team_id, window=None, limit=10):
     return out
 
 
+def _team_name(conn, team_id):
+    """The team's stored name, used to match the detail-page team naming.
+
+    The per-match detail tables (map_results, rounds) record teams by name, not
+    by our team id, and those names line up with teams.name. So the side-split
+    queries resolve the id to a name once and filter the detail rows on it.
+    """
+    row = conn.execute("SELECT name FROM teams WHERE id = ?", (team_id,)).fetchone()
+    return row["name"] if row else None
+
+
+def team_map_results(conn, team_id, window=None):
+    """Return the per-map results for maps this team played, within the window.
+
+    One row per map instance, framed by the detail-page team naming: map_name,
+    winner_name, and the two side names. The date filter is on the parent match.
+    Feeds stats.map_winrates. Returns [] when the team has no stored detail.
+    """
+    name = _team_name(conn, team_id)
+    if name is None:
+        return []
+    window = window or DateWindow.all_time()
+    wclause, wparams = window.clause("m.date")
+    return conn.execute(
+        f"""
+        SELECT mr.match_id, mr.map_name, mr.winner_name,
+               mr.team1_name, mr.team2_name
+        FROM map_results mr
+        JOIN matches m ON m.match_id = mr.match_id
+        WHERE (mr.team1_name = ? OR mr.team2_name = ?)
+          AND {wclause}
+        """,
+        [name, name, *wparams],
+    ).fetchall()
+
+
+def team_rounds(conn, team_id, window=None):
+    """Return the round-level rows for maps this team played, within the window.
+
+    One row per decided round on a map the team was in: map_name, winner_side,
+    and winner_team. Scoped to the team's maps by joining map_results on the
+    match and map, so the round set belongs only to maps this team played. The
+    date filter is on the parent match. Feeds stats.side_winrates.
+    """
+    name = _team_name(conn, team_id)
+    if name is None:
+        return []
+    window = window or DateWindow.all_time()
+    wclause, wparams = window.clause("m.date")
+    return conn.execute(
+        f"""
+        SELECT r.map_name, r.winner_side, r.winner_team
+        FROM rounds r
+        JOIN map_results mr
+          ON mr.match_id = r.match_id AND mr.map_name = r.map_name
+        JOIN matches m ON m.match_id = r.match_id
+        WHERE (mr.team1_name = ? OR mr.team2_name = ?)
+          AND {wclause}
+        """,
+        [name, name, *wparams],
+    ).fetchall()
+
+
 def match_date_bounds(conn):
     """Return (min_date, max_date) ISO strings across stored matches.
 

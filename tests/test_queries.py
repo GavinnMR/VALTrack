@@ -159,6 +159,89 @@ def test_recent_matches_perspective_and_limit(tmp_path):
     conn.close()
 
 
+def _add_team(conn, team_id, name):
+    conn.execute("INSERT INTO teams (id, name) VALUES (?, ?)", (team_id, name))
+
+
+def _add_map_result(conn, match_id, map_name, t1_name, t2_name, winner):
+    conn.execute(
+        """
+        INSERT INTO map_results (match_id, map_name, team1_name, team2_name,
+                                 winner_name)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (match_id, map_name, t1_name, t2_name, winner),
+    )
+
+
+def _add_round(conn, match_id, map_name, side, winner_team):
+    conn.execute(
+        """
+        INSERT INTO rounds (match_id, map_name, winner_side, winner_team)
+        VALUES (?, ?, ?, ?)
+        """,
+        (match_id, map_name, side, winner_team),
+    )
+
+
+def test_team_map_results_resolves_name_and_window(tmp_path):
+    from valtrack.queries import team_map_results
+
+    conn = _fresh_conn(tmp_path)
+    _add_team(conn, 100, "Alpha")
+    _add_team(conn, 200, "Beta")
+    # Alpha plays in either detail slot; the date lives on the parent match.
+    _add_match(conn, 1, 100, 200, 2, 0, "2024-01-10")
+    _add_map_result(conn, 1, "Ascent", "Alpha", "Beta", "Alpha")
+    _add_match(conn, 2, 200, 100, 2, 1, "2024-05-10")
+    _add_map_result(conn, 2, "Bind", "Beta", "Alpha", "Beta")
+    # A map from a match outside Alpha entirely must not appear.
+    _add_match(conn, 3, 200, 300, 2, 0, "2024-03-10")
+    _add_map_result(conn, 3, "Lotus", "Beta", "Gamma", "Beta")
+    conn.commit()
+
+    rows = team_map_results(conn, 100)
+    assert sorted(r["map_name"] for r in rows) == ["Ascent", "Bind"]
+
+    w = DateWindow(date(2024, 1, 1), date(2024, 3, 1))
+    rows = team_map_results(conn, 100, w)
+    assert [r["map_name"] for r in rows] == ["Ascent"]
+    conn.close()
+
+
+def test_team_rounds_scoped_to_teams_maps_and_windowed(tmp_path):
+    from valtrack.queries import team_rounds
+
+    conn = _fresh_conn(tmp_path)
+    _add_team(conn, 100, "Alpha")
+    _add_match(conn, 1, 100, 200, 2, 0, "2024-01-10")
+    _add_map_result(conn, 1, "Ascent", "Alpha", "Beta", "Alpha")
+    _add_round(conn, 1, "Ascent", "atk", "Alpha")
+    _add_round(conn, 1, "Ascent", "def", "Beta")
+    # A round on a map Alpha did not play (different match) is excluded.
+    _add_match(conn, 2, 200, 300, 2, 0, "2024-02-10")
+    _add_map_result(conn, 2, "Bind", "Beta", "Gamma", "Beta")
+    _add_round(conn, 2, "Bind", "atk", "Beta")
+    conn.commit()
+
+    rows = team_rounds(conn, 100)
+    assert len(rows) == 2
+    assert {r["map_name"] for r in rows} == {"Ascent"}
+
+    w = DateWindow(date(2024, 2, 1), None)
+    assert team_rounds(conn, 100, w) == []
+    conn.close()
+
+
+def test_team_detail_queries_empty_for_unknown_team(tmp_path):
+    from valtrack.queries import team_map_results, team_rounds
+
+    conn = _fresh_conn(tmp_path)
+    assert team_map_results(conn, 999) == []
+    assert team_rounds(conn, 999) == []
+    conn.close()
+
+
 def test_match_date_bounds(tmp_path):
     from valtrack.queries import match_date_bounds
 

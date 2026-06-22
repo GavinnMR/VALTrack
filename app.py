@@ -94,6 +94,49 @@ def render_snapshot(team):
     st.caption("Event placements are not harvested yet.")
 
 
+def pct(rate):
+    """A win rate (0..1) as a whole-percent string, or a dash when unknown."""
+    return f"{100 * rate:.0f}%" if rate is not None else "-"
+
+
+def render_map_splits(conn, team, window):
+    """Per-map win rate with attack and defense side splits for the window.
+
+    Computed from the stored rounds, so it only has figures for maps whose
+    per-match detail has been harvested. When none is stored for this team in the
+    range, say so plainly rather than show an empty table.
+    """
+    st.divider()
+    st.subheader("Per-map and side win rates")
+    map_rows = queries.team_map_results(conn, team["id"], window)
+    round_rows = queries.team_rounds(conn, team["id"], window)
+    table = stats.per_map_splits(map_rows, round_rows, team["name"])
+    if not table:
+        st.caption(
+            "No per-map detail stored in this range. Run the detail harvest "
+            "(python harvest.py --pass details) to populate it."
+        )
+        return
+    rows = []
+    for m in table:
+        decided = m["won"] + m["lost"]
+        rows.append({
+            "Map": m["map_name"],
+            "Maps": f"{m['won']}-{m['lost']}",
+            "Map win%": pct(m["map_winrate"]) if decided else "-",
+            "ATK win%": pct(m["atk_winrate"]),
+            "ATK rounds": m["atk_total"],
+            "DEF win%": pct(m["def_winrate"]),
+            "DEF rounds": m["def_total"],
+        })
+    st.dataframe(pd.DataFrame(rows), hide_index=True)
+    st.caption(
+        "Map win% is over decided maps. Side win rates are over rounds played "
+        "on that side. Round and map counts are shown so a small sample is "
+        "visible."
+    )
+
+
 def render_recent(conn, team, window):
     st.divider()
     st.subheader("Recent matches")
@@ -155,6 +198,7 @@ def render_team(conn, column, team, window):
 
         render_record_and_form(conn, team, window)
         render_snapshot(team)
+        render_map_splits(conn, team, window)
         render_recent(conn, team, window)
         render_roster(conn, team)
 

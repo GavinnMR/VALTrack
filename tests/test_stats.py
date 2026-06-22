@@ -4,7 +4,13 @@ These are the bits that can silently mislead, so they are pinned to known
 inputs: a streak must count the full current run, and the roster split must
 survive VLR's unreliable staff flag and its occasionally mangled role text.
 """
-from valtrack.stats import classify_roster, form_and_streak
+from valtrack.stats import (
+    classify_roster,
+    form_and_streak,
+    map_winrates,
+    per_map_splits,
+    side_winrates,
+)
 
 
 def test_form_and_streak_basic():
@@ -96,3 +102,120 @@ def test_classify_realistic_mix_yields_five_mains():
     assert len(out["mains"]) == 5
     assert len(out["subs"]) == 1
     assert len(out["staff"]) == 3
+
+
+# --- per-map win rates and side splits (Build Step 6) -----------------------
+
+def _map(map_name, winner, t1="A", t2="B"):
+    return {
+        "map_name": map_name,
+        "winner_name": winner,
+        "team1_name": t1,
+        "team2_name": t2,
+    }
+
+
+def _rounds(map_name, spec):
+    """Expand a compact spec into round rows.
+
+    `spec` is a list of (winner_side, winner_team, count) tuples.
+    """
+    rows = []
+    for side, team, count in spec:
+        rows.extend(
+            {"map_name": map_name, "winner_side": side, "winner_team": team}
+            for _ in range(count)
+        )
+    return rows
+
+
+def test_map_winrates_counts_decided_and_skips_forfeits():
+    rows = [
+        _map("Ascent", "A"),
+        _map("Bind", "B"),
+        _map("Haven", "A"),
+        _map("Haven", "B"),
+        _map("Split", None),  # forfeit / unplayed, no winner
+    ]
+    out = map_winrates(rows, "A")
+    assert out["Ascent"] == {"won": 1, "lost": 0, "winrate": 1.0}
+    assert out["Bind"] == {"won": 0, "lost": 1, "winrate": 0.0}
+    assert out["Haven"] == {"won": 1, "lost": 1, "winrate": 0.5}
+    # The forfeit is present but decides nothing, so its rate is None.
+    assert out["Split"] == {"won": 0, "lost": 0, "winrate": None}
+
+
+def test_side_winrates_hand_checked():
+    # Ascent from A's point of view, a 13-3 win:
+    #   A wins 4 attacking, B wins 2 defending  -> A attacked 6, won 4
+    #   A wins 9 defending, B wins 1 attacking   -> A defended 10, won 9
+    rounds = _rounds("Ascent", [
+        ("atk", "A", 4),
+        ("def", "B", 2),
+        ("def", "A", 9),
+        ("atk", "B", 1),
+    ])
+    out = side_winrates(rounds, "A")["Ascent"]
+    assert out["atk_won"] == 4
+    assert out["atk_total"] == 6
+    assert out["atk_winrate"] == 4 / 6
+    assert out["def_won"] == 9
+    assert out["def_total"] == 10
+    assert out["def_winrate"] == 9 / 10
+
+
+def test_side_winrates_from_opponent_perspective_is_the_mirror():
+    rounds = _rounds("Ascent", [
+        ("atk", "A", 4),
+        ("def", "B", 2),
+        ("def", "A", 9),
+        ("atk", "B", 1),
+    ])
+    out = side_winrates(rounds, "B")["Ascent"]
+    # B attacked when A defended: B won 1, lost 9 -> 1/10 attacking.
+    assert out["atk_won"] == 1
+    assert out["atk_total"] == 10
+    assert out["atk_winrate"] == 1 / 10
+    # B defended when A attacked: B won 2, lost 4 -> 2/6 defending.
+    assert out["def_won"] == 2
+    assert out["def_total"] == 6
+    assert out["def_winrate"] == 2 / 6
+
+
+def test_side_winrate_is_none_when_a_side_has_no_rounds():
+    # A swept on defense only (no attack rounds recorded for the map).
+    rounds = _rounds("Icebox", [("def", "A", 13), ("atk", "B", 5)])
+    out = side_winrates(rounds, "A")["Icebox"]
+    assert out["atk_won"] == 0
+    assert out["atk_total"] == 0
+    assert out["atk_winrate"] is None
+    assert out["def_won"] == 13
+    assert out["def_total"] == 18
+    assert out["def_winrate"] == 13 / 18
+
+
+def test_per_map_splits_merges_and_orders_by_decided_maps():
+    map_rows = [
+        _map("Lotus", "A"),
+        _map("Lotus", "A"),
+        _map("Sunset", "B"),
+    ]
+    round_rows = (
+        _rounds("Lotus", [("atk", "A", 13), ("def", "B", 5)])
+        + _rounds("Sunset", [("def", "A", 7), ("atk", "B", 13)])
+    )
+    table = per_map_splits(map_rows, round_rows, "A")
+    # Lotus has two decided maps, Sunset one, so Lotus sorts first.
+    assert [r["map_name"] for r in table] == ["Lotus", "Sunset"]
+    lotus = table[0]
+    assert lotus["won"] == 2 and lotus["lost"] == 0
+    assert lotus["map_winrate"] == 1.0
+    # A won 13 attacking, B won 5 defending: A attacked all 18 rounds here.
+    assert lotus["atk_won"] == 13 and lotus["atk_total"] == 18
+    assert lotus["def_total"] == 0
+    assert lotus["rounds_total"] == 18
+    sunset = table[1]
+    assert sunset["won"] == 0 and sunset["lost"] == 1
+    # A won 7 defending, B won 13 attacking: A defended all 20 rounds here.
+    assert sunset["def_won"] == 7 and sunset["def_total"] == 20
+    assert sunset["atk_total"] == 0
