@@ -8,6 +8,7 @@ from valtrack.stats import (
     align_rosters,
     classify_roster,
     form_and_streak,
+    is_small_sample,
     map_winrates,
     opening_duels,
     per_map_splits,
@@ -16,6 +17,14 @@ from valtrack.stats import (
     primary_role,
     side_winrates,
 )
+
+
+def test_is_small_sample():
+    assert is_small_sample(3, 5) is True
+    assert is_small_sample(5, 5) is False   # threshold itself is enough
+    assert is_small_sample(9, 5) is False
+    assert is_small_sample(0, 5) is True
+    assert is_small_sample(None, 5) is True  # missing count counts as small
 
 
 def test_form_and_streak_basic():

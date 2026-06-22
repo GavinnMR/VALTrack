@@ -25,6 +25,17 @@ _STAFF_MARKERS = ("coach", "manager", "analyst", "staff", "owner", "director")
 _SUB_MARKERS = ("stand-in", "standin", "substitute")
 
 
+def is_small_sample(n, threshold):
+    """True when a count rests on too few observations to trust.
+
+    A figure over very few rounds, maps, or matches can swing wildly, so the UI
+    flags it rather than presenting it as if it were solid. A None or zero count
+    is treated as small. The threshold is the smallest count still considered
+    enough, so n below it is flagged.
+    """
+    return (n or 0) < threshold
+
+
 def form_and_streak(results, n=5):
     """Summarize recent results into a short form list and the current streak.
 

@@ -18,6 +18,25 @@ from valtrack.window import DateWindow
 
 st.set_page_config(page_title="VALTrack", layout="wide")
 
+# Smallest sample still treated as solid for each kind of figure. Below these a
+# statistic is flagged, because a rate over very few observations can swing on a
+# single result. They are deliberately modest: a flag means "read with care",
+# not "ignore". One map is about 24 rounds, so the round thresholds sit near a
+# map or a half.
+MIN_MATCHES = 5        # decided matches behind a record or form
+MIN_MAP_ROUNDS = 24    # rounds behind a per-map side split
+MIN_PISTOLS = 10       # pistol rounds behind the pistol rate
+MIN_DUELS = 20         # opening duels behind an opening-duel rate
+MIN_PLAYER_MAPS = 4    # maps behind a player's aggregated line
+MIN_VETO_APPEAR = 5    # times a map was in the pool behind its veto rates
+
+FLAG = "⚠"        # the small-sample marker shown next to a thin figure
+
+
+def flag_if_small(n, threshold):
+    """Return the warning marker when a count is a small sample, else blank."""
+    return f" {FLAG}" if stats.is_small_sample(n, threshold) else ""
+
 
 def rank_text(rank):
     """Show a rank, or an honest placeholder when we have none. Never a guess."""
@@ -70,7 +89,8 @@ def render_record_and_form(conn, team, window):
     else:
         winpct = "n/a"
     st.metric(f"Record ({window.label})", f"{record['wins']}-{record['losses']}")
-    st.caption(f"{record['decided']} decided matches, win rate {winpct}")
+    flag = flag_if_small(record["decided"], MIN_MATCHES)
+    st.caption(f"{record['decided']} decided matches, win rate {winpct}{flag}")
 
     fs = stats.form_and_streak(queries.decided_results(conn, team["id"], window))
     if fs["decided"]:
@@ -120,8 +140,9 @@ def render_map_splits(conn, team, window):
     rows = []
     for m in table:
         decided = m["won"] + m["lost"]
+        flag = flag_if_small(m["rounds_total"], MIN_MAP_ROUNDS)
         rows.append({
-            "Map": m["map_name"],
+            "Map": m["map_name"] + flag,
             "Maps": f"{m['won']}-{m['lost']}",
             "Map win%": pct(m["map_winrate"]) if decided else "-",
             "ATK win%": pct(m["atk_winrate"]),
@@ -131,9 +152,9 @@ def render_map_splits(conn, team, window):
         })
     st.dataframe(pd.DataFrame(rows), hide_index=True)
     st.caption(
-        "Map win% is over decided maps. Side win rates are over rounds played "
-        "on that side. Round and map counts are shown so a small sample is "
-        "visible."
+        f"Map win% is over decided maps. Side win rates are over rounds played "
+        f"on that side. Round and map counts are shown so a small sample is "
+        f"visible; {FLAG} marks a map with fewer than {MIN_MAP_ROUNDS} rounds."
     )
 
 
@@ -164,11 +185,12 @@ def render_pistol(conn, team, window):
     defense.metric(
         "DEF pistol%", pct(p["def_winrate"]), help=f"{p['def_won']} of {p['def_total']}"
     )
+    small = flag_if_small(p["total"], MIN_PISTOLS)
     st.caption(
-        f"Pistol win rate over {p['total']} pistol rounds (round 1 and round 13 "
-        "of each map). Eco and anti-eco conversion are not shown: the data source "
-        "returns broken per-map economy, so those figures are deferred until it is "
-        "fixed."
+        f"Pistol win rate over {p['total']} pistol rounds{small} (round 1 and "
+        f"round 13 of each map){'; small sample' if small else ''}. Eco and "
+        "anti-eco conversion are not shown: the data source returns broken per-map "
+        "economy, so those figures are deferred until it is fixed."
     )
 
 
@@ -207,7 +229,7 @@ def render_opening(conn, team, window):
     player_rows = []
     for p in o["players"]:
         player_rows.append({
-            "Player": p["player_name"],
+            "Player": p["player_name"] + flag_if_small(p["duels"], MIN_DUELS),
             "FK": p["fk"],
             "FD": p["fd"],
             "Duels": p["duels"],
@@ -216,12 +238,14 @@ def render_opening(conn, team, window):
             "DEF%": pct(p["def_winrate"]),
         })
     st.dataframe(pd.DataFrame(player_rows), hide_index=True)
+    team_small = flag_if_small(o["duels"], MIN_DUELS)
     st.caption(
-        "Opening-duel win rate is first kills over opening duels (first kills "
-        "plus first deaths). The attack and defense splits are per-side totals, "
-        "not a round-by-round timeline, since the source stores only per-map "
-        "first-kill and first-death counts. Duel counts are shown so a small "
-        "sample is visible."
+        f"Opening-duel win rate is first kills over opening duels (first kills "
+        f"plus first deaths). The attack and defense splits are per-side totals, "
+        f"not a round-by-round timeline, since the source stores only per-map "
+        f"first-kill and first-death counts. Duel counts are shown so a small "
+        f"sample is visible; {FLAG} marks fewer than {MIN_DUELS} duels"
+        f"{' (team total included)' if team_small else ''}."
     )
 
 
@@ -263,7 +287,7 @@ def render_player_stats(conn, team, window):
     table = []
     for p in players:
         table.append({
-            "Player": p["player_name"],
+            "Player": p["player_name"] + flag_if_small(p["maps"], MIN_PLAYER_MAPS),
             "Rating": num2(p["rating"]),
             "ACS": num1(p["acs"]),
             "K/D": num2(p["kd"]),
@@ -298,8 +322,9 @@ def render_player_stats(conn, team, window):
         "player's maps; K/D, KPR, APR, and the first-kill and first-death per-round "
         "rates are totals over the rounds played. HS% is round-weighted as an "
         "approximation, since the source stores only the per-map percentage. Maps "
-        "and rounds are shown so a small sample is visible. Clutch statistics are "
-        "not available from the data source."
+        f"and rounds are shown so a small sample is visible; {FLAG} marks fewer "
+        f"than {MIN_PLAYER_MAPS} maps. Clutch statistics are not available from "
+        "the data source."
     )
 
 
@@ -313,7 +338,7 @@ def _pvp_side(player):
         return {"name": "", "rating": "-", "acs": "-", "kd": "-",
                 "kast": "-", "open": "-"}
     return {
-        "name": player["player_name"],
+        "name": player["player_name"] + flag_if_small(player["maps"], MIN_PLAYER_MAPS),
         "rating": num2(player["rating"]),
         "acs": num1(player["acs"]),
         "kd": num2(player["kd"]),
@@ -378,8 +403,9 @@ def render_veto_reconstruction(conn, team_a, team_b, window):
         tags.setdefault(rec["decider"], "decider")
     pool_rows = []
     for r in rec["rows"]:
+        seen = (r["a_appearances"] or 0) + (r["b_appearances"] or 0)
         pool_rows.append({
-            "Map": r["map"],
+            "Map": r["map"] + flag_if_small(seen, MIN_VETO_APPEAR),
             "Likely": tags.get(r["map"], "ban"),
             f"{team_a['tag'] or 'A'} pick%": pct(r["a_pick_rate"]),
             f"{team_a['tag'] or 'A'} ban%": pct(r["a_ban_rate"]),
@@ -427,8 +453,9 @@ def render_veto_reconstruction(conn, team_a, team_b, window):
         "an actual upcoming veto. The pool is inferred from the maps seen most in "
         "that history (narrow the date range for the current rotation). Play "
         "likelihood is each team's pick rate minus ban rate, summed; it ranks "
-        "maps, it does not predict the match winner. Pick and ban rates are over "
-        "the matches each map was in the pool."
+        f"maps, it does not predict the match winner. Pick and ban rates are over "
+        f"the matches each map was in the pool; {FLAG} marks a map seen in fewer "
+        f"than {MIN_VETO_APPEAR} of the two teams' vetos combined."
     )
     st.divider()
 
@@ -481,8 +508,9 @@ def render_player_vs_player(conn, team_a, team_b, window):
     st.caption(
         "Roles are inferred from each player's agent usage, not an explicit "
         "source field, so they are best-effort. Players are paired position by "
-        "position within a role; an empty cell means one team had fewer players "
-        "in that role in this range. Opening-duel win rate is first kills over "
+        f"position within a role; an empty cell means one team had fewer players "
+        f"in that role in this range. {FLAG} marks a player with fewer than "
+        f"{MIN_PLAYER_MAPS} maps. Opening-duel win rate is first kills over "
         "opening duels. Figures rest on the windowed per-map detail, so a small "
         "sample shows in the per-team player tables above."
     )
