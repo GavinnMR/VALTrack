@@ -329,6 +329,44 @@ def test_team_record_event_filter_excludes_unknown_events(tmp_path):
     conn.close()
 
 
+def test_head_to_head(tmp_path):
+    from valtrack.queries import head_to_head
+
+    conn = _fresh_conn(tmp_path)
+    me, opp = 100, 200
+    _add_named_match(conn, 1, me, "Alpha", opp, "Beta", 2, 0, "2024-01-10")   # A win
+    _add_named_match(conn, 2, opp, "Beta", me, "Alpha", 2, 1, "2024-02-10")   # B win, A is team2
+    _add_named_match(conn, 3, me, "Alpha", 300, "Gamma", 2, 0, "2024-03-10")  # not h2h
+    conn.commit()
+
+    h = head_to_head(conn, me, opp)
+    assert h["a_wins"] == 1 and h["b_wins"] == 1 and h["decided"] == 2
+    # Newest first: match 2 (B win) then match 1 (A win).
+    assert [m["winner"] for m in h["meetings"]] == ["b", "a"]
+    # Scores are framed from A's point of view even when A was team2.
+    assert h["meetings"][0]["a_score"] == 1 and h["meetings"][0]["b_score"] == 2
+
+
+def test_schedule_strength(tmp_path):
+    from valtrack.queries import schedule_strength
+
+    conn = _fresh_conn(tmp_path)
+    _add_team(conn, 100, "Alpha")
+    _add_team(conn, 200, "Beta")
+    _add_team(conn, 300, "Gamma")
+    conn.execute("UPDATE teams SET regional_rank = 4 WHERE id = 200")
+    conn.execute("UPDATE teams SET regional_rank = 10 WHERE id = 300")
+    _add_match(conn, 1, 100, 200, 2, 0, "2024-01-10")   # opp rank 4
+    _add_match(conn, 2, 100, 300, 2, 1, "2024-02-10")   # opp rank 10
+    _add_match(conn, 3, 100, 999, 2, 0, "2024-03-10")   # opp not stored, no rank
+    conn.commit()
+
+    s = schedule_strength(conn, 100)
+    assert s["decided"] == 3
+    assert s["ranked"] == 2
+    assert s["avg_opp_rank"] == 7.0   # (4 + 10) / 2
+
+
 def test_common_opponents(tmp_path):
     from valtrack.queries import common_opponents
 

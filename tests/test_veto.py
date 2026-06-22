@@ -67,6 +67,37 @@ def test_team_tendencies_drops_non_map_junk():
     assert set(out) == {"Bind"}
 
 
+def test_team_tendencies_tracks_last_seen():
+    rows = [
+        {"match_id": 1, "team_token": "PRX", "action": "pick",
+         "map_name": "Bind", "match_date": "2026-01-01"},
+        {"match_id": 2, "team_token": "PRX", "action": "ban",
+         "map_name": "Bind", "match_date": "2026-03-01"},
+    ]
+    out = team_tendencies(rows, "PRX")
+    assert out["Bind"]["last_seen"] == "2026-03-01"
+
+
+def test_active_pool_prefers_recent_maps_over_stale_volume():
+    # An old map seen often vs current maps seen less: with recency, the stale map
+    # drops out of the pool despite its volume.
+    a = {
+        "OldMap": {"appearances": 50, "last_seen": "2021-01-01"},
+        "NewMap": {"appearances": 5, "last_seen": "2026-06-01"},
+        "Ascent": {"appearances": 20, "last_seen": "2026-05-01"},
+    }
+    pool = active_pool(a, {}, size=2)
+    assert "OldMap" not in pool
+    assert set(pool) == {"Ascent", "NewMap"}
+
+
+def test_active_pool_without_dates_falls_back_to_appearances():
+    # No last_seen anywhere: behaves like the old appearance-only ranking.
+    a = {m: {"appearances": n} for m, n in
+         {"Ascent": 5, "Bind": 9, "Haven": 2}.items()}
+    assert active_pool(a, {}, size=2) == ["Bind", "Ascent"]
+
+
 def test_active_pool_takes_most_seen_maps():
     a = {m: {"appearances": n} for m, n in
          {"Ascent": 5, "Bind": 4, "Haven": 3, "Lotus": 2}.items()}

@@ -41,6 +41,18 @@ def _ensure_columns(conn):
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
+def ensure_columns(conn):
+    """Run the idempotent column migration on an existing connection.
+
+    The app opens a database that may predate later columns (the harvest adds
+    them through init_db, but the app does not run the full schema). Calling this
+    on startup self-heals an older database so a missing column does not crash a
+    view. Safe to call every run.
+    """
+    _ensure_columns(conn)
+    conn.commit()
+
+
 def init_db(db_path=DB_PATH):
     """Create any missing tables from schema.sql. Safe to call repeatedly."""
     schema = SCHEMA_PATH.read_text(encoding="utf-8")

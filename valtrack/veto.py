@@ -18,6 +18,8 @@ resolved to a team by comparing against teams.tag, repairing the occasional
 mojibake token first. Veto rows whose map is not a real Valorant map are dropped,
 which also clears the junk the source sometimes puts in the veto field.
 """
+from datetime import date, timedelta
+
 from valtrack.cleaning import fix_encoding
 
 # The Valorant maps that have been in competitive rotation. Aggregation is
@@ -46,6 +48,18 @@ def _token_matches(token, tag):
     return fix_encoding(token).strip().casefold() == str(tag).strip().casefold()
 
 
+def _row_get(row, key):
+    """Read a key from a sqlite Row or a plain dict, None when absent.
+
+    The veto rows from the query carry a match date, but the hand-built test rows
+    may not, so this tolerates a missing column rather than raising.
+    """
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return None
+
+
 def team_tendencies(veto_rows, team_tag):
     """Summarize one team's veto tendencies per map.
 
@@ -67,8 +81,13 @@ def team_tendencies(veto_rows, team_tag):
         name = row["map_name"]
         if name not in CANON_MAPS:
             continue
-        agg = maps.setdefault(name, {"matches": set(), "bans": 0, "picks": 0})
+        agg = maps.setdefault(
+            name, {"matches": set(), "bans": 0, "picks": 0, "last_seen": None}
+        )
         agg["matches"].add(row["match_id"])
+        match_date = _row_get(row, "match_date")
+        if match_date and (agg["last_seen"] is None or match_date > agg["last_seen"]):
+            agg["last_seen"] = match_date
         action = row["action"]
         if action in ("ban", "pick") and _token_matches(row["team_token"], team_tag):
             agg[action + "s"] += 1
@@ -81,22 +100,46 @@ def team_tendencies(veto_rows, team_tag):
             "picks": agg["picks"],
             "ban_rate": _rate(agg["bans"], appearances),
             "pick_rate": _rate(agg["picks"], appearances),
+            "last_seen": agg["last_seen"],
         }
     return out
 
 
-def active_pool(tend_a, tend_b, size=7):
-    """Infer the current map pool from veto history (most-seen maps first).
+def active_pool(tend_a, tend_b, size=7, recent_days=365):
+    """Infer the current map pool from veto history, favoring recent maps.
 
-    Rather than hardcode a pool that goes stale each patch, take the maps that
-    appear most across both teams' tendencies. Narrowing the date range sharpens
-    this to the current rotation. Returns up to `size` map names.
+    Rather than hardcode a pool that goes stale each patch, take the maps seen
+    across both teams' tendencies. To keep an all-time window from dragging in
+    maps that have rotated out, a map seen within recent_days of the latest veto
+    in the data is preferred over an older one; among maps in the same recency
+    bucket, the more frequently seen lead. When the tendencies carry no dates (as
+    in hand-built tests), recency is ignored and this falls back to ranking by
+    appearances. Returns up to `size` map names.
     """
     appearances = {}
+    last_seen = {}
     for tend in (tend_a, tend_b):
         for name, agg in tend.items():
             appearances[name] = appearances.get(name, 0) + agg["appearances"]
-    ranked = sorted(appearances, key=lambda n: (-appearances[n], n))
+            seen = agg.get("last_seen")
+            if seen and (name not in last_seen or seen > last_seen[name]):
+                last_seen[name] = seen
+
+    cutoff = None
+    if last_seen:
+        latest = max(last_seen.values())
+        cutoff = (date.fromisoformat(latest) - timedelta(days=recent_days)).isoformat()
+
+    def is_recent(name):
+        # No date for this map (or none at all): do not penalize it.
+        if cutoff is None or name not in last_seen:
+            return True
+        return last_seen[name] >= cutoff
+
+    ranked = sorted(
+        appearances,
+        key=lambda n: (0 if is_recent(n) else 1, -appearances[n], n),
+    )
     return ranked[:size]
 
 

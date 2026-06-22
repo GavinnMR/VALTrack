@@ -370,7 +370,8 @@ def team_vetos(conn, team_id, window=None):
     wclause, wparams = window.clause("m.date")
     return conn.execute(
         f"""
-        SELECT v.match_id, v.seq, v.team_token, v.action, v.map_name
+        SELECT v.match_id, v.seq, v.team_token, v.action, v.map_name,
+               m.date AS match_date
         FROM match_vetos v
         JOIN matches m ON m.match_id = v.match_id
         WHERE (m.team1_id = ? OR m.team2_id = ?)
@@ -379,6 +380,96 @@ def team_vetos(conn, team_id, window=None):
         """,
         [team_id, team_id, *wparams],
     ).fetchall()
+
+
+def head_to_head(conn, team_a_id, team_b_id, window=None, events=None):
+    """The direct record and meetings between two teams, framed from A.
+
+    Finds matches these two teams played against each other (either slot), within
+    the window and event filter, and returns each decided meeting newest first
+    plus the head-to-head record. Ties and undecided rows drop out. Returns a dict
+    with a_wins, b_wins, decided, and a meetings list (date, event, scores from
+    A's point of view, and which side won).
+    """
+    window = window or DateWindow.all_time()
+    events = events or EventFilter()
+    wclause, wparams = window.clause("date")
+    eclause, eparams = events.clause("event_name")
+    rows = conn.execute(
+        f"""
+        SELECT match_id, date, event_round, event_name,
+               team1_id, team1_name, team1_score,
+               team2_id, team2_name, team2_score
+        FROM matches
+        WHERE ((team1_id = ? AND team2_id = ?) OR (team1_id = ? AND team2_id = ?))
+          AND team1_score IS NOT NULL
+          AND team2_score IS NOT NULL
+          AND team1_score != team2_score
+          AND {wclause}
+          AND {eclause}
+        ORDER BY date DESC, match_id DESC
+        """,
+        [team_a_id, team_b_id, team_b_id, team_a_id, *wparams, *eparams],
+    ).fetchall()
+    meetings = []
+    a_wins = b_wins = 0
+    for r in rows:
+        if r["team1_id"] == team_a_id:
+            a_score, b_score = r["team1_score"], r["team2_score"]
+        else:
+            a_score, b_score = r["team2_score"], r["team1_score"]
+        winner = "a" if a_score > b_score else "b"
+        if winner == "a":
+            a_wins += 1
+        else:
+            b_wins += 1
+        meetings.append({
+            "match_id": r["match_id"],
+            "date": r["date"],
+            "event": r["event_name"] or r["event_round"],
+            "a_score": a_score,
+            "b_score": b_score,
+            "winner": winner,
+        })
+    return {
+        "a_wins": a_wins, "b_wins": b_wins,
+        "decided": a_wins + b_wins, "meetings": meetings,
+    }
+
+
+def schedule_strength(conn, team_id, window=None, events=None):
+    """A team's strength of schedule: average opponent rank over the window.
+
+    For each decided match, the opponent is looked up in the stored teams to read
+    its current regional rank. Returns the average of those ranks, how many
+    opponents were ranked, and the total decided matches. Only stored teams carry
+    a rank (mostly other franchise teams), and the rank is VLR's current snapshot
+    applied to past matches, so this is a rough strength signal, not exact. A None
+    average means no opponent in range had a stored rank.
+    """
+    window = window or DateWindow.all_time()
+    events = events or EventFilter()
+    wclause, wparams = window.clause("m.date")
+    eclause, eparams = events.clause("m.event_name")
+    rows = conn.execute(
+        f"""
+        SELECT t.regional_rank AS rank
+        FROM matches m
+        LEFT JOIN teams t ON t.id = (
+            CASE WHEN m.team1_id = ? THEN m.team2_id ELSE m.team1_id END
+        )
+        WHERE (m.team1_id = ? OR m.team2_id = ?)
+          AND m.team1_score IS NOT NULL
+          AND m.team2_score IS NOT NULL
+          AND m.team1_score != m.team2_score
+          AND {wclause}
+          AND {eclause}
+        """,
+        [team_id, team_id, team_id, *wparams, *eparams],
+    ).fetchall()
+    ranks = [r["rank"] for r in rows if r["rank"] is not None]
+    avg = sum(ranks) / len(ranks) if ranks else None
+    return {"avg_opp_rank": avg, "ranked": len(ranks), "decided": len(rows)}
 
 
 def _opponent_records(conn, team_id, window, events):

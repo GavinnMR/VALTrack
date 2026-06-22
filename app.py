@@ -132,6 +132,20 @@ def render_record_and_form(conn, team, window, events):
     flag = flag_if_small(record["decided"], MIN_MATCHES)
     st.caption(f"{record['decided']} decided matches, win rate {winpct}{flag}")
 
+    sos = queries.schedule_strength(conn, team["id"], window, events)
+    if sos["ranked"]:
+        st.caption(
+            f"Strength of schedule: average opponent rank about #"
+            f"{sos['avg_opp_rank']:.0f} over {sos['ranked']} ranked opponents "
+            f"(of {sos['decided']} decided). Ranks are VLR's current snapshot and "
+            "only stored teams carry one, so this is a rough signal."
+        )
+    elif sos["decided"]:
+        st.caption(
+            f"Strength of schedule: none of the {sos['decided']} opponents in this "
+            "range have a stored rank, so an average is not shown."
+        )
+
     results = queries.decided_results(conn, team["id"], window, events)
     fs = stats.form_and_streak(results)
     if fs["decided"]:
@@ -190,6 +204,33 @@ def render_map_splits(conn, team, window):
             "DEF rounds": m["def_total"],
         })
     st.dataframe(pd.DataFrame(rows), hide_index=True)
+
+    chart = [m for m in table
+             if m["atk_winrate"] is not None or m["def_winrate"] is not None]
+    if chart:
+        names = [m["map_name"] for m in chart]
+        fig = go.Figure()
+        fig.add_bar(
+            name="ATK",
+            x=names,
+            y=[100 * m["atk_winrate"] if m["atk_winrate"] is not None else None
+               for m in chart],
+        )
+        fig.add_bar(
+            name="DEF",
+            x=names,
+            y=[100 * m["def_winrate"] if m["def_winrate"] is not None else None
+               for m in chart],
+        )
+        fig.update_layout(
+            barmode="group",
+            height=260,
+            margin=dict(l=0, r=0, t=10, b=0),
+            yaxis=dict(title="win %", range=[0, 100]),
+            legend=dict(orientation="h", y=1.1),
+        )
+        st.plotly_chart(fig, width="stretch")
+
     st.caption(
         f"Map win% is over decided maps. Side win rates are over rounds played "
         f"on that side. Round and map counts are shown so a small sample is "
@@ -415,7 +456,6 @@ def render_veto_reconstruction(conn, team_a, team_b, window):
             "No veto data stored in this range for these teams. Run the detail "
             "harvest (python harvest.py --pass details) to populate it."
         )
-        st.divider()
         return
     rec = veto.reconstruct(a_tend, b_tend, pool)
 
@@ -449,6 +489,29 @@ def render_veto_reconstruction(conn, team_a, team_b, window):
             "Play likelihood": f"{r['play_score']:+.2f}",
         })
     st.dataframe(pd.DataFrame(pool_rows), hide_index=True)
+
+    def role_color(map_name):
+        label = tags.get(map_name, "ban")
+        if "pick" in label:
+            return "#2a9d8f"   # a team's likely pick
+        if label == "decider":
+            return "#e9c46a"   # probable decider
+        return "#b9b9b9"       # likely ban
+
+    chart_maps = [r["map"] for r in rec["rows"]]
+    fig = go.Figure(go.Bar(
+        x=[r["play_score"] for r in rec["rows"]],
+        y=chart_maps,
+        orientation="h",
+        marker_color=[role_color(m) for m in chart_maps],
+    ))
+    fig.update_layout(
+        height=max(180, 30 * len(chart_maps)),
+        margin=dict(l=0, r=0, t=10, b=0),
+        xaxis_title="play likelihood (pick rate minus ban rate, both teams)",
+        yaxis=dict(autorange="reversed"),
+    )
+    st.plotly_chart(fig, width="stretch")
 
     st.subheader("Win rates on the likely-played maps")
     a_splits = _team_map_splits(conn, team_a, window)
@@ -492,7 +555,6 @@ def render_veto_reconstruction(conn, team_a, team_b, window):
         f"the matches each map was in the pool; {FLAG} marks a map seen in fewer "
         f"than {MIN_VETO_APPEAR} of the two teams' vetos combined."
     )
-    st.divider()
 
 
 def render_player_vs_player(conn, team_a, team_b, window, five_only):
@@ -557,6 +619,39 @@ def render_player_vs_player(conn, team_a, team_b, window, five_only):
         f"{MIN_PLAYER_MAPS} maps. Opening-duel win rate is first kills over "
         "opening duels. Figures rest on the windowed per-map detail, so a small "
         "sample shows in the per-team player tables above."
+    )
+
+
+def render_head_to_head(conn, team_a, team_b, window, events):
+    """The two teams' direct record against each other, when they have met."""
+    st.divider()
+    st.header("Head-to-head")
+    h2h = queries.head_to_head(conn, team_a["id"], team_b["id"], window, events)
+    if not h2h["decided"]:
+        st.caption(
+            "These two teams have not played a decided match in this range and "
+            "event type. Teams in different regions often meet only at "
+            "international events, so try widening the date range."
+        )
+        return
+    left, right = st.columns(2)
+    left.metric(f"{team_a['name']} wins", h2h["a_wins"])
+    right.metric(f"{team_b['name']} wins", h2h["b_wins"])
+    flag = flag_if_small(h2h["decided"], MIN_MATCHES)
+    st.caption(f"{h2h['decided']} meetings{flag}")
+    rows = []
+    for m in h2h["meetings"]:
+        winner = team_a["name"] if m["winner"] == "a" else team_b["name"]
+        rows.append({
+            "Date": m["date"],
+            "Event": m["event"] or "",
+            "Score (A-B)": f"{m['a_score']}-{m['b_score']}",
+            "Winner": winner,
+        })
+    st.dataframe(pd.DataFrame(rows), hide_index=True)
+    st.caption(
+        "Direct meetings between the two teams, newest first, scores from "
+        f"{team_a['name']}'s point of view."
     )
 
 
@@ -867,6 +962,7 @@ def main():
 
     conn = db.connect()
     db.ensure_app_tables(conn)
+    db.ensure_columns(conn)  # self-heal an older database missing newer columns
     try:
         render_freshness(conn)
         st.divider()
@@ -942,16 +1038,21 @@ def main():
             return
 
         st.divider()
-        render_veto_reconstruction(conn, team_a, team_b, window)
-
-        show_left, show_right = st.columns(2)
-        render_team(conn, show_left, team_a, window, five_only, events)
-        render_team(conn, show_right, team_b, window, five_only, events)
-
-        render_player_vs_player(conn, team_a, team_b, window, five_only)
-        render_common_opponents(conn, team_a, team_b, window, events)
-        render_notes(conn, team_a, team_b)
-        render_matchup_log(conn, team_a, team_b)
+        tab_teams, tab_matchup, tab_notes = st.tabs(
+            ["Team comparison", "Matchup", "Notes and log"]
+        )
+        with tab_teams:
+            show_left, show_right = st.columns(2)
+            render_team(conn, show_left, team_a, window, five_only, events)
+            render_team(conn, show_right, team_b, window, five_only, events)
+        with tab_matchup:
+            render_veto_reconstruction(conn, team_a, team_b, window)
+            render_head_to_head(conn, team_a, team_b, window, events)
+            render_player_vs_player(conn, team_a, team_b, window, five_only)
+            render_common_opponents(conn, team_a, team_b, window, events)
+        with tab_notes:
+            render_notes(conn, team_a, team_b)
+            render_matchup_log(conn, team_a, team_b)
     finally:
         conn.close()
 
