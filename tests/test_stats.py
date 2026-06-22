@@ -9,6 +9,7 @@ from valtrack.stats import (
     form_and_streak,
     map_winrates,
     per_map_splits,
+    pistol_winrate,
     side_winrates,
 )
 
@@ -219,3 +220,81 @@ def test_per_map_splits_merges_and_orders_by_decided_maps():
     # A won 7 defending, B won 13 attacking: A defended all 20 rounds here.
     assert sunset["def_won"] == 7 and sunset["def_total"] == 20
     assert sunset["atk_total"] == 0
+
+
+# --- pistol-round win rate (Build Step 7) -----------------------------------
+
+def _pistols(spec):
+    """Expand a compact spec into pistol round rows.
+
+    `spec` is a list of (winner_side, winner_team, count) tuples, all flagged as
+    pistols. Real rounds carry a map_name too, but pistol_winrate ignores it, so
+    these rows only need what it reads.
+    """
+    rows = []
+    for side, team, count in spec:
+        rows.extend(
+            {"winner_side": side, "winner_team": team, "is_pistol": 1}
+            for _ in range(count)
+        )
+    return rows
+
+
+def test_pistol_winrate_hand_checked_overall_and_sides():
+    # A's pistols across some maps:
+    #   won 3 on attack, lost 2 on attack (opponent won those defending),
+    #   won 4 on defense, lost 1 on defense (opponent won that attacking).
+    rows = _pistols([
+        ("atk", "A", 3),  # A attacked and won
+        ("def", "B", 2),  # B defended and won -> A attacked and lost
+        ("def", "A", 4),  # A defended and won
+        ("atk", "B", 1),  # B attacked and won -> A defended and lost
+    ])
+    out = pistol_winrate(rows, "A")
+    assert out["won"] == 7
+    assert out["total"] == 10
+    assert out["winrate"] == 7 / 10
+    assert out["atk_won"] == 3 and out["atk_total"] == 5
+    assert out["atk_winrate"] == 3 / 5
+    assert out["def_won"] == 4 and out["def_total"] == 5
+    assert out["def_winrate"] == 4 / 5
+
+
+def test_pistol_winrate_from_opponent_is_the_mirror():
+    rows = _pistols([
+        ("atk", "A", 3),
+        ("def", "B", 2),
+        ("def", "A", 4),
+        ("atk", "B", 1),
+    ])
+    out = pistol_winrate(rows, "B")
+    # B won the 2 def pistols and the 1 atk pistol -> 3 of 10.
+    assert out["won"] == 3
+    assert out["total"] == 10
+    assert out["winrate"] == 3 / 10
+    # B attacked when A defended: B won 1, lost 4 -> 1 of 5.
+    assert out["atk_won"] == 1 and out["atk_total"] == 5
+    # B defended when A attacked: B won 2, lost 3 -> 2 of 5.
+    assert out["def_won"] == 2 and out["def_total"] == 5
+
+
+def test_pistol_winrate_ignores_non_pistol_rounds():
+    rows = _pistols([("atk", "A", 1), ("def", "A", 1)])
+    # Non-pistol rounds on the same maps must not count toward pistols.
+    rows += [
+        {"winner_side": "atk", "winner_team": "A", "is_pistol": 0},
+        {"winner_side": "def", "winner_team": "B", "is_pistol": 0},
+    ]
+    out = pistol_winrate(rows, "A")
+    assert out["won"] == 2
+    assert out["total"] == 2
+    assert out["winrate"] == 1.0
+
+
+def test_pistol_winrate_is_none_with_no_pistols():
+    out = pistol_winrate([], "A")
+    assert out["won"] == 0
+    assert out["total"] == 0
+    assert out["winrate"] is None
+    assert out["atk_winrate"] is None
+    assert out["def_winrate"] is None

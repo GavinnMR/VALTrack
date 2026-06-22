@@ -223,9 +223,10 @@ def team_rounds(conn, team_id, window=None):
     """Return the round-level rows for maps this team played, within the window.
 
     One row per decided round on a map the team was in: map_name, winner_side,
-    and winner_team. Scoped to the team's maps by joining map_results on the
-    match and map, so the round set belongs only to maps this team played. The
-    date filter is on the parent match. Feeds stats.side_winrates.
+    winner_team, and is_pistol. Scoped to the team's maps by joining map_results
+    on the match and map, so the round set belongs only to maps this team played.
+    The date filter is on the parent match. Feeds stats.side_winrates and, via the
+    is_pistol flag, stats.pistol_winrate, so both read the same round set.
     """
     name = _team_name(conn, team_id)
     if name is None:
@@ -234,7 +235,7 @@ def team_rounds(conn, team_id, window=None):
     wclause, wparams = window.clause("m.date")
     return conn.execute(
         f"""
-        SELECT r.map_name, r.winner_side, r.winner_team
+        SELECT r.map_name, r.winner_side, r.winner_team, r.is_pistol
         FROM rounds r
         JOIN map_results mr
           ON mr.match_id = r.match_id AND mr.map_name = r.map_name

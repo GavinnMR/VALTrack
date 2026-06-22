@@ -159,6 +159,66 @@ def side_winrates(round_rows, team_name):
     return result
 
 
+def pistol_winrate(round_rows, team_name):
+    """Team-level pistol-round win rate, overall and split by side.
+
+    Each row needs is_pistol, winner_side ("atk" or "def"), and winner_team. A
+    pistol round is the first round of each half (round 1 and round 13), flagged
+    as is_pistol in the stored rounds. As with the side splits, the rounds table
+    holds only the winner of each round, but the two teams sit on opposite sides,
+    so this team's pistol record follows from the winners alone:
+
+      - a pistol this team won on attack is an attack pistol won,
+      - a pistol the opponent won on defense is an attack pistol this team lost,
+
+    and the mirror for defense. The caller scopes the rows to maps this team
+    played, so "winner_team is not this team" is unambiguously the opponent.
+
+    Unlike the per-map splits, pistol win rate is reported at team level only:
+    each map carries one or two pistols, so a per-map pistol figure would rest on
+    a sample too thin to mean anything. The won and total counts come back so the
+    overall sample is visible.
+
+    Returns a dict with overall {won, total, winrate} and attack and defense
+    counterparts ({atk_won, atk_total, atk_winrate, def_won, def_total,
+    def_winrate}); a rate is None when there are no pistols on that side.
+    """
+    won = total = 0
+    atk_won = atk_total = def_won = def_total = 0
+    for row in round_rows:
+        if not row["is_pistol"]:
+            continue
+        side = row["winner_side"]
+        if side not in ("atk", "def"):
+            continue
+        won_by_team = row["winner_team"] == team_name
+        total += 1
+        if won_by_team:
+            won += 1
+        # The pistol is an attack pistol for this team when this team won it on
+        # attack or the opponent won it on defense, and a defense pistol the
+        # other way round.
+        if (side == "atk") == won_by_team:
+            atk_total += 1
+            if won_by_team:
+                atk_won += 1
+        else:
+            def_total += 1
+            if won_by_team:
+                def_won += 1
+    return {
+        "won": won,
+        "total": total,
+        "winrate": _rate(won, total),
+        "atk_won": atk_won,
+        "atk_total": atk_total,
+        "atk_winrate": _rate(atk_won, atk_total),
+        "def_won": def_won,
+        "def_total": def_total,
+        "def_winrate": _rate(def_won, def_total),
+    }
+
+
 def per_map_splits(map_rows, round_rows, team_name):
     """Combine the map win record and side splits into one per-map table.
 

@@ -137,6 +137,41 @@ def render_map_splits(conn, team, window):
     )
 
 
+def render_pistol(conn, team, window):
+    """Team-level pistol-round win rate with attack and defense splits.
+
+    Computed from the stored rounds (round 1 and round 13 of each map), so it
+    only has figures where per-match detail has been harvested. The won/total
+    sample is shown so a thin pistol sample is visible. Economy conversion (eco
+    and anti-eco) is not shown: the data source returns broken per-map economy,
+    so those figures are deferred rather than guessed.
+    """
+    st.divider()
+    st.subheader("Pistol rounds")
+    round_rows = queries.team_rounds(conn, team["id"], window)
+    p = stats.pistol_winrate(round_rows, team["name"])
+    if p["total"] == 0:
+        st.caption(
+            "No per-map detail stored in this range. Run the detail harvest "
+            "(python harvest.py --pass details) to populate it."
+        )
+        return
+    overall, atk, defense = st.columns(3)
+    overall.metric("Pistol win%", pct(p["winrate"]), help=f"{p['won']} of {p['total']}")
+    atk.metric(
+        "ATK pistol%", pct(p["atk_winrate"]), help=f"{p['atk_won']} of {p['atk_total']}"
+    )
+    defense.metric(
+        "DEF pistol%", pct(p["def_winrate"]), help=f"{p['def_won']} of {p['def_total']}"
+    )
+    st.caption(
+        f"Pistol win rate over {p['total']} pistol rounds (round 1 and round 13 "
+        "of each map). Eco and anti-eco conversion are not shown: the data source "
+        "returns broken per-map economy, so those figures are deferred until it is "
+        "fixed."
+    )
+
+
 def render_recent(conn, team, window):
     st.divider()
     st.subheader("Recent matches")
@@ -199,6 +234,7 @@ def render_team(conn, column, team, window):
         render_record_and_form(conn, team, window)
         render_snapshot(team)
         render_map_splits(conn, team, window)
+        render_pistol(conn, team, window)
         render_recent(conn, team, window)
         render_roster(conn, team)
 
