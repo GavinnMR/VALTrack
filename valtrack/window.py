@@ -39,9 +39,14 @@ class EventFilter:
     """A LAN/online filter that ANDs into a query the same way DateWindow does.
 
     mode is "all" (no filter), "lan" (only inferred LAN events), or "online"
-    (everything else, including events with no name). The LAN test mirrors
-    is_lan_event in SQL. Like DateWindow this is all-qmark, since SQLite forbids
-    mixing named and positional parameters in one statement.
+    (events with a known name that are not LAN). The environment is inferred from
+    event_name, which only the per-match detail pass fills in, so a match with no
+    stored event name has an unknown environment. Such matches are excluded from
+    both the LAN and online buckets rather than guessed into one, so the split
+    only ever covers matches we can actually classify; "all" still includes them.
+
+    The LAN test mirrors is_lan_event in SQL. Like DateWindow this is all-qmark,
+    since SQLite forbids mixing named and positional parameters in one statement.
     """
     mode: str = "all"
 
@@ -51,9 +56,12 @@ class EventFilter:
         expr = f"LOWER(COALESCE({column}, ''))"
         likes = " OR ".join(f"{expr} LIKE ?" for _ in LAN_MARKERS)
         params = [f"%{m}%" for m in LAN_MARKERS]
+        # A LAN marker can only match a non-empty name, so "lan" already excludes
+        # unknown-event rows. "online" must exclude them explicitly.
         if self.mode == "lan":
             return (f"({likes})", params)
-        return (f"NOT ({likes})", params)
+        known = f"({column} IS NOT NULL AND {column} != '')"
+        return (f"({known} AND NOT ({likes}))", params)
 
 
 @dataclass(frozen=True)

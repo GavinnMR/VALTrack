@@ -301,6 +301,34 @@ def test_team_player_stats_joins_round_count_and_windows(tmp_path):
     conn.close()
 
 
+def test_team_record_event_filter_excludes_unknown_events(tmp_path):
+    from valtrack.queries import team_record
+    from valtrack.window import EventFilter
+
+    conn = _fresh_conn(tmp_path)
+    me, opp = 100, 200
+
+    def add(mid, score_us, score_them, event_name):
+        conn.execute(
+            "INSERT INTO matches (match_id, team1_id, team2_id, team1_score, "
+            "team2_score, date, event_name) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (mid, me, opp, score_us, score_them, "2024-01-10", event_name),
+        )
+
+    add(1, 2, 0, "Champions Tour 2024: Masters Madrid")  # LAN win
+    add(2, 2, 1, "VCT 2024: EMEA Stage 1")               # online win
+    add(3, 0, 2, None)                                    # unknown-event loss
+    conn.commit()
+
+    assert team_record(conn, me) == {"wins": 2, "losses": 1, "decided": 3}
+    lan = team_record(conn, me, events=EventFilter("lan"))
+    assert lan == {"wins": 1, "losses": 0, "decided": 1}
+    online = team_record(conn, me, events=EventFilter("online"))
+    # The online win counts; the unknown-event loss is excluded from both buckets.
+    assert online == {"wins": 1, "losses": 0, "decided": 1}
+    conn.close()
+
+
 def test_common_opponents(tmp_path):
     from valtrack.queries import common_opponents
 

@@ -16,7 +16,7 @@ def _now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _pair_key(team_a_id, team_b_id):
+def pair_key(team_a_id, team_b_id):
     """A stable key for a team pair, order independent.
 
     The same two teams map to one note whichever is picked as A or B, so the key
@@ -30,7 +30,7 @@ def get_note(conn, team_a_id, team_b_id):
     """The saved note for a team pair, or an empty string when there is none."""
     row = conn.execute(
         "SELECT body FROM matchup_notes WHERE pair_key = ?",
-        (_pair_key(team_a_id, team_b_id),),
+        (pair_key(team_a_id, team_b_id),),
     ).fetchone()
     return row["body"] if row and row["body"] else ""
 
@@ -45,7 +45,7 @@ def save_note(conn, team_a_id, team_b_id, body):
             body = excluded.body,
             updated_at = excluded.updated_at
         """,
-        (_pair_key(team_a_id, team_b_id), body, _now()),
+        (pair_key(team_a_id, team_b_id), body, _now()),
     )
     conn.commit()
 

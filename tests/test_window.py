@@ -73,11 +73,13 @@ def test_event_filter_all_is_noop():
     assert sql == "1=1" and params == []
 
 
-def test_event_filter_lan_and_online_are_complementary():
+def test_event_filter_lan_and_online_exclude_unknown_events():
     lan_sql, lan_params = EventFilter("lan").clause("event_name")
     on_sql, on_params = EventFilter("online").clause("event_name")
-    # Same bound params, online is the negation of the LAN match.
+    # Same bound LAN markers either way, all-qmark so it composes with the window.
     assert lan_params == on_params
-    assert on_sql == f"NOT {lan_sql}"
-    # All-qmark, no named params, so it composes with the date window.
     assert lan_params.count("%masters%") == 1
+    # Online excludes the LAN markers and also requires a known event name, so a
+    # match with no stored event name lands in neither bucket (only "all").
+    assert "NOT (" in on_sql
+    assert "IS NOT NULL" in on_sql and "IS NOT NULL" not in lan_sql

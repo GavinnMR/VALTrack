@@ -42,6 +42,12 @@ MIN_VETO_APPEAR = 5    # times a map was in the pool behind its veto rates
 
 FLAG = "⚠"        # the small-sample marker shown next to a thin figure
 
+# Shown wherever a section has no per-match detail in the selected range.
+DETAIL_EMPTY = (
+    "No per-map detail stored in this range. Run the detail harvest "
+    "(python harvest.py --pass details) to populate it."
+)
+
 
 def flag_if_small(n, threshold):
     """Return the warning marker when a count is a small sample, else blank."""
@@ -168,10 +174,7 @@ def render_map_splits(conn, team, window):
     round_rows = queries.team_rounds(conn, team["id"], window)
     table = stats.per_map_splits(map_rows, round_rows, team["name"])
     if not table:
-        st.caption(
-            "No per-map detail stored in this range. Run the detail harvest "
-            "(python harvest.py --pass details) to populate it."
-        )
+        st.caption(DETAIL_EMPTY)
         return
     rows = []
     for m in table:
@@ -208,10 +211,7 @@ def render_pistol(conn, team, window):
     round_rows = queries.team_rounds(conn, team["id"], window)
     p = stats.pistol_winrate(round_rows, team["name"])
     if p["total"] == 0:
-        st.caption(
-            "No per-map detail stored in this range. Run the detail harvest "
-            "(python harvest.py --pass details) to populate it."
-        )
+        st.caption(DETAIL_EMPTY)
         return
     overall, atk, defense = st.columns(3)
     overall.metric("Pistol win%", pct(p["winrate"]), help=f"{p['won']} of {p['total']}")
@@ -247,10 +247,7 @@ def render_opening(conn, team, window, five_names=None):
     )
     o = stats.opening_duels(rows, team["name"])
     if o["duels"] == 0:
-        st.caption(
-            "No per-map detail stored in this range. Run the detail harvest "
-            "(python harvest.py --pass details) to populate it."
-        )
+        st.caption(DETAIL_EMPTY)
         return
     overall, atk, defense = st.columns(3)
     overall.metric(
@@ -321,10 +318,7 @@ def render_player_stats(conn, team, window, five_names=None):
     )
     players = stats.player_aggregates(rows, team["name"])
     if not players:
-        st.caption(
-            "No per-map detail stored in this range. Run the detail harvest "
-            "(python harvest.py --pass details) to populate it."
-        )
+        st.caption(DETAIL_EMPTY)
         return
     table = []
     for p in players:
@@ -435,7 +429,6 @@ def render_veto_reconstruction(conn, team_a, team_b, window):
     if rec["likely_bans"]:
         st.caption("Likely bans: " + ", ".join(rec["likely_bans"]))
 
-    played = set(rec["likely_played"])
     tags = {}
     if rec["a_pick"]:
         tags[rec["a_pick"]] = f"{team_a['tag'] or 'A'} pick"
@@ -604,7 +597,7 @@ def render_notes(conn, team_a, team_b):
     """A free-text note saved locally for this team pair."""
     st.divider()
     st.subheader("Notes")
-    key = f"note_{journal._pair_key(team_a['id'], team_b['id'])}"
+    key = f"note_{journal.pair_key(team_a['id'], team_b['id'])}"
     if key not in st.session_state:
         st.session_state[key] = journal.get_note(conn, team_a["id"], team_b["id"])
     st.text_area(
@@ -913,12 +906,20 @@ def main():
             help=(
                 "LAN versus online is inferred from event names, so it is best-"
                 "effort. It narrows the match-level figures: record, form, and "
-                "recent matches."
+                "recent matches. The event name comes from the per-match detail, "
+                "so a match without detail has an unknown environment and is "
+                "counted only under All, not LAN or Online."
             ),
         )
         events = EventFilter(
             {"All": "all", "International LAN": "lan", "Online/other": "online"}[env]
         )
+        if env != "All":
+            st.caption(
+                "LAN and Online cover only matches whose event is known (those "
+                "with per-match detail harvested). As the detail harvest fills "
+                "in, this split covers more matches."
+            )
 
         mn, mx = queries.match_date_bounds(conn)
         if window.is_all_time:
@@ -938,6 +939,7 @@ def main():
         team_b = queries.get_team(conn, teams[b]["id"])
         if team_a["id"] == team_b["id"]:
             st.warning("Pick two different teams to compare.")
+            return
 
         st.divider()
         render_veto_reconstruction(conn, team_a, team_b, window)
