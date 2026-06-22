@@ -23,6 +23,10 @@ def connect(db_path=DB_PATH):
 _ADDED_COLUMNS = [
     ("matches", "map_vetos_raw", "TEXT"),
     ("matches", "details_fetched_at", "TEXT"),
+    ("map_player_stats", "first_kills_atk", "INTEGER"),
+    ("map_player_stats", "first_kills_def", "INTEGER"),
+    ("map_player_stats", "first_deaths_atk", "INTEGER"),
+    ("map_player_stats", "first_deaths_def", "INTEGER"),
 ]
 
 

@@ -172,6 +172,59 @@ def render_pistol(conn, team, window):
     )
 
 
+def render_opening(conn, team, window):
+    """Team and per-player opening-duel win rates with attack and defense splits.
+
+    Computed from the per-map first-kill and first-death counts in the stored
+    detail, so it only has figures where per-match detail has been harvested. The
+    counts are per-map totals, not per-round events, so the split is over the
+    opening duels taken on each side rather than a round-by-round timeline. The
+    duel counts are shown so a thin sample stays visible.
+    """
+    st.divider()
+    st.subheader("Opening duels")
+    rows = queries.team_player_opening(conn, team["id"], window)
+    o = stats.opening_duels(rows, team["name"])
+    if o["duels"] == 0:
+        st.caption(
+            "No per-map detail stored in this range. Run the detail harvest "
+            "(python harvest.py --pass details) to populate it."
+        )
+        return
+    overall, atk, defense = st.columns(3)
+    overall.metric(
+        "Opening-duel win%", pct(o["winrate"]),
+        help=f"{o['fk']} first kills of {o['duels']} opening duels",
+    )
+    atk.metric(
+        "ATK opening%", pct(o["atk_winrate"]),
+        help=f"{o['atk_fk']} of {o['atk_duels']}",
+    )
+    defense.metric(
+        "DEF opening%", pct(o["def_winrate"]),
+        help=f"{o['def_fk']} of {o['def_duels']}",
+    )
+    player_rows = []
+    for p in o["players"]:
+        player_rows.append({
+            "Player": p["player_name"],
+            "FK": p["fk"],
+            "FD": p["fd"],
+            "Duels": p["duels"],
+            "Win%": pct(p["winrate"]),
+            "ATK%": pct(p["atk_winrate"]),
+            "DEF%": pct(p["def_winrate"]),
+        })
+    st.dataframe(pd.DataFrame(player_rows), hide_index=True)
+    st.caption(
+        "Opening-duel win rate is first kills over opening duels (first kills "
+        "plus first deaths). The attack and defense splits are per-side totals, "
+        "not a round-by-round timeline, since the source stores only per-map "
+        "first-kill and first-death counts. Duel counts are shown so a small "
+        "sample is visible."
+    )
+
+
 def render_recent(conn, team, window):
     st.divider()
     st.subheader("Recent matches")
@@ -235,6 +288,7 @@ def render_team(conn, column, team, window):
         render_snapshot(team)
         render_map_splits(conn, team, window)
         render_pistol(conn, team, window)
+        render_opening(conn, team, window)
         render_recent(conn, team, window)
         render_roster(conn, team)
 

@@ -153,6 +153,14 @@ CREATE TABLE IF NOT EXISTS map_player_stats (
     hs_pct       TEXT,
     first_kills  INTEGER,
     first_deaths INTEGER,
+    -- Per-side opening duels (attack = T side, defense = CT side), used for the
+    -- attack and defense opening-duel split in Build Step 8. VLR stores only
+    -- per-map per-player totals, not per-round first-blood events, so these are
+    -- side totals rather than a round-by-round timeline.
+    first_kills_atk  INTEGER,
+    first_kills_def  INTEGER,
+    first_deaths_atk INTEGER,
+    first_deaths_def INTEGER,
     fetched_at   TEXT,
     FOREIGN KEY (match_id) REFERENCES matches (match_id)
 );

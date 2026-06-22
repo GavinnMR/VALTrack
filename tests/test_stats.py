@@ -8,6 +8,7 @@ from valtrack.stats import (
     classify_roster,
     form_and_streak,
     map_winrates,
+    opening_duels,
     per_map_splits,
     pistol_winrate,
     side_winrates,
@@ -298,3 +299,87 @@ def test_pistol_winrate_is_none_with_no_pistols():
     assert out["winrate"] is None
     assert out["atk_winrate"] is None
     assert out["def_winrate"] is None
+
+
+# --- opening-duel win rate (Build Step 8) -----------------------------------
+
+def _duel(team, player, fk, fd, atk_fk, atk_fd, def_fk, def_fd):
+    """One per-map opening-duel row, shaped like a map_player_stats row."""
+    return {
+        "team_name": team,
+        "player_name": player,
+        "first_kills": fk,
+        "first_deaths": fd,
+        "first_kills_atk": atk_fk,
+        "first_deaths_atk": atk_fd,
+        "first_kills_def": def_fk,
+        "first_deaths_def": def_fd,
+    }
+
+
+def test_opening_duels_hand_checked_team_and_sides():
+    rows = [
+        # Two maps for two of A's players, plus an opponent row that must not
+        # count toward A's totals.
+        _duel("A", "ace", 4, 2, 3, 1, 1, 1),
+        _duel("A", "ace", 3, 3, 2, 1, 1, 2),
+        _duel("A", "bee", 1, 4, 0, 2, 1, 2),
+        _duel("B", "zee", 9, 0, 5, 0, 4, 0),
+    ]
+    out = opening_duels(rows, "A")
+    # Team totals: fk 4+3+1 = 8, fd 2+3+4 = 9, duels 17.
+    assert out["fk"] == 8 and out["fd"] == 9 and out["duels"] == 17
+    assert out["winrate"] == 8 / 17
+    # Attack: fk 3+2+0 = 5, fd 1+1+2 = 4.
+    assert out["atk_fk"] == 5 and out["atk_duels"] == 9
+    assert out["atk_winrate"] == 5 / 9
+    # Defense: fk 1+1+1 = 3, fd 1+2+2 = 5.
+    assert out["def_fk"] == 3 and out["def_duels"] == 8
+    assert out["def_winrate"] == 3 / 8
+
+
+def test_opening_duels_per_player_aggregates_and_sorts_by_duels():
+    rows = [
+        _duel("A", "ace", 4, 2, 3, 1, 1, 1),
+        _duel("A", "ace", 3, 3, 2, 1, 1, 2),
+        _duel("A", "bee", 1, 4, 0, 2, 1, 2),
+    ]
+    out = opening_duels(rows, "A")
+    # ace has 12 duels, bee 5, so ace leads.
+    assert [p["player_name"] for p in out["players"]] == ["ace", "bee"]
+    ace = out["players"][0]
+    assert ace["fk"] == 7 and ace["fd"] == 5 and ace["duels"] == 12
+    assert ace["winrate"] == 7 / 12
+    assert ace["atk_fk"] == 5 and ace["atk_duels"] == 7
+    assert ace["def_fk"] == 2 and ace["def_duels"] == 5
+
+
+def test_opening_duels_ignores_the_opponent():
+    rows = [
+        _duel("A", "ace", 4, 2, 3, 1, 1, 1),
+        _duel("B", "zee", 9, 9, 5, 5, 4, 4),
+    ]
+    out = opening_duels(rows, "A")
+    assert out["fk"] == 4 and out["fd"] == 2
+    assert [p["player_name"] for p in out["players"]] == ["ace"]
+
+
+def test_opening_duels_treats_null_counts_as_zero():
+    rows = [
+        _duel("A", "ace", None, None, None, None, None, None),
+        _duel("A", "ace", 2, 1, 2, 1, None, None),
+    ]
+    out = opening_duels(rows, "A")
+    assert out["fk"] == 2 and out["fd"] == 1 and out["duels"] == 3
+    assert out["atk_fk"] == 2 and out["atk_duels"] == 3
+    # No defense duels recorded, so that side stays None rather than 0%.
+    assert out["def_duels"] == 0 and out["def_winrate"] is None
+
+
+def test_opening_duels_is_none_with_no_duels():
+    out = opening_duels([], "A")
+    assert out["duels"] == 0
+    assert out["winrate"] is None
+    assert out["atk_winrate"] is None
+    assert out["def_winrate"] is None
+    assert out["players"] == []

@@ -41,12 +41,14 @@ def _segment():
                         "acs": "250", "kills": "20", "deaths": "14",
                         "assists": "5", "kast": "75%", "adr": "165.2",
                         "hs_pct": "28%", "fk": "4", "fd": "2",
+                        "fk_t": "3", "fk_ct": "1", "fd_t": "1", "fd_ct": "1",
                     }],
                     "team2": [{
                         "name": "Bplayer", "agent": "Sova", "rating": "0.95",
                         "acs": "180", "kills": "13", "deaths": "18",
                         "assists": "7", "kast": "60%", "adr": "120.0",
                         "hs_pct": "22%", "fk": "2", "fd": "5",
+                        "fk_t": "1", "fk_ct": "1", "fd_t": "2", "fd_ct": "3",
                     }],
                 },
                 "rounds": [
@@ -68,12 +70,14 @@ def _segment():
                         "acs": "210", "kills": "17", "deaths": "16",
                         "assists": "4", "kast": "68%", "adr": "140.0",
                         "hs_pct": "25%", "fk": "3", "fd": "3",
+                        "fk_t": "2", "fk_ct": "1", "fd_t": "1", "fd_ct": "2",
                     }],
                     "team2": [{
                         "name": "Bplayer", "agent": "Killjoy", "rating": "1.30",
                         "acs": "275", "kills": "22", "deaths": "13",
                         "assists": "6", "kast": "80%", "adr": "180.0",
                         "hs_pct": "30%", "fk": "5", "fd": "2",
+                        "fk_t": "3", "fk_ct": "2", "fd_t": "1", "fd_ct": "1",
                     }],
                 },
                 "rounds": [
@@ -186,6 +190,17 @@ def test_parse_players_assigned_to_their_team():
     assert by_name["Aplayer"]["kast"] == "75%"
 
 
+def test_parse_players_maps_per_side_opening_duels():
+    # fk_t / fd_t are the attack totals, fk_ct / fd_ct the defense totals.
+    haven = parse_match_detail(_segment())["maps"][0]
+    a = {p["player_name"]: p for p in haven["players"]}["Aplayer"]
+    assert a["first_kills_atk"] == 3 and a["first_kills_def"] == 1
+    assert a["first_deaths_atk"] == 1 and a["first_deaths_def"] == 1
+    # The combined totals still split into the two sides.
+    assert a["first_kills_atk"] + a["first_kills_def"] == a["first_kills"]
+    assert a["first_deaths_atk"] + a["first_deaths_def"] == a["first_deaths"]
+
+
 # --- store ------------------------------------------------------------------
 
 def _conn_with_match(tmp_path):
@@ -223,6 +238,21 @@ def test_store_writes_all_rich_tables(tmp_path):
     assert row["event_name"] == "Test Event: Week 1"
     assert "Ascent remains" in row["map_vetos_raw"]
     assert row["details_fetched_at"] is not None
+    conn.close()
+
+
+def test_store_writes_per_side_opening_duels(tmp_path):
+    conn = _conn_with_match(tmp_path)
+    store_match_detail(conn, 9001, parse_match_detail(_segment()))
+    conn.commit()
+    # Aplayer across both maps: attack FK 3+2, defense FK 1+1.
+    row = conn.execute(
+        "SELECT SUM(first_kills_atk) AS atk_fk, SUM(first_kills_def) AS def_fk, "
+        "SUM(first_deaths_atk) AS atk_fd, SUM(first_deaths_def) AS def_fd "
+        "FROM map_player_stats WHERE player_name = 'Aplayer'"
+    ).fetchone()
+    assert (row["atk_fk"], row["def_fk"]) == (5, 2)
+    assert (row["atk_fd"], row["def_fd"]) == (2, 3)
     conn.close()
 
 

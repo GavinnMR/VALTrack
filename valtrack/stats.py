@@ -219,6 +219,88 @@ def pistol_winrate(round_rows, team_name):
     }
 
 
+def _duel_block(fk, fd, atk_fk, atk_fd, def_fk, def_fd):
+    """Shape one team's or player's opening-duel counts into a display dict.
+
+    Opening-duel win rate is first kills over opening duels (first kills plus
+    first deaths): of the round-opening fights this team or player was in, the
+    share that went their way. The side splits are the same ratio over the
+    attack-side and defense-side duels. A rate is None when there are no duels on
+    that side, which is honest rather than printing 0%.
+    """
+    duels = fk + fd
+    atk_duels = atk_fk + atk_fd
+    def_duels = def_fk + def_fd
+    return {
+        "fk": fk,
+        "fd": fd,
+        "duels": duels,
+        "winrate": _rate(fk, duels),
+        "atk_fk": atk_fk,
+        "atk_fd": atk_fd,
+        "atk_duels": atk_duels,
+        "atk_winrate": _rate(atk_fk, atk_duels),
+        "def_fk": def_fk,
+        "def_fd": def_fd,
+        "def_duels": def_duels,
+        "def_winrate": _rate(def_fk, def_duels),
+    }
+
+
+def opening_duels(player_rows, team_name):
+    """Team and per-player opening-duel win rates, overall and split by side.
+
+    Each row needs team_name, player_name, and the per-map first-kill and
+    first-death counts: first_kills, first_deaths, and the per-side
+    first_kills_atk / first_kills_def / first_deaths_atk / first_deaths_def. The
+    counts are per-map totals (VLR does not expose per-round first-blood events),
+    so this is a true attack and defense split but not a round-by-round timeline.
+
+    Rows for the opponent are ignored, so the caller can pass every player on a
+    map. A null count is treated as zero. Returns a dict with the team totals
+    (see _duel_block) and a "players" list of the same shape per player, sorted
+    by opening duels descending then player name, so the entry duelists lead.
+    """
+    def num(value):
+        return value or 0
+
+    team = {
+        "fk": 0, "fd": 0, "atk_fk": 0, "atk_fd": 0, "def_fk": 0, "def_fd": 0,
+    }
+    per_player = {}
+    for row in player_rows:
+        if row["team_name"] != team_name:
+            continue
+        name = row["player_name"]
+        agg = per_player.setdefault(
+            name,
+            {"fk": 0, "fd": 0, "atk_fk": 0, "atk_fd": 0, "def_fk": 0, "def_fd": 0},
+        )
+        for key, src in (
+            ("fk", "first_kills"), ("fd", "first_deaths"),
+            ("atk_fk", "first_kills_atk"), ("atk_fd", "first_deaths_atk"),
+            ("def_fk", "first_kills_def"), ("def_fd", "first_deaths_def"),
+        ):
+            v = num(row[src])
+            agg[key] += v
+            team[key] += v
+
+    players = [
+        {"player_name": name, **_duel_block(
+            a["fk"], a["fd"], a["atk_fk"], a["atk_fd"], a["def_fk"], a["def_fd"]
+        )}
+        for name, a in per_player.items()
+    ]
+    players.sort(key=lambda p: (-p["duels"], p["player_name"]))
+
+    result = _duel_block(
+        team["fk"], team["fd"], team["atk_fk"], team["atk_fd"],
+        team["def_fk"], team["def_fd"],
+    )
+    result["players"] = players
+    return result
+
+
 def per_map_splits(map_rows, round_rows, team_name):
     """Combine the map win record and side splits into one per-map table.
 

@@ -247,6 +247,35 @@ def team_rounds(conn, team_id, window=None):
     ).fetchall()
 
 
+def team_player_opening(conn, team_id, window=None):
+    """Return per-map opening-duel counts for this team's players in the window.
+
+    One row per player per map the team played, framed by the detail-page team
+    naming: player_name, team_name, the combined first_kills / first_deaths, and
+    the per-side first_kills_atk / first_kills_def / first_deaths_atk /
+    first_deaths_def. The date filter is on the parent match. Feeds
+    stats.opening_duels. Returns [] when the team has no stored detail.
+    """
+    name = _team_name(conn, team_id)
+    if name is None:
+        return []
+    window = window or DateWindow.all_time()
+    wclause, wparams = window.clause("m.date")
+    return conn.execute(
+        f"""
+        SELECT mps.player_name, mps.team_name,
+               mps.first_kills, mps.first_deaths,
+               mps.first_kills_atk, mps.first_kills_def,
+               mps.first_deaths_atk, mps.first_deaths_def
+        FROM map_player_stats mps
+        JOIN matches m ON m.match_id = mps.match_id
+        WHERE mps.team_name = ?
+          AND {wclause}
+        """,
+        [name, *wparams],
+    ).fetchall()
+
+
 def match_date_bounds(conn):
     """Return (min_date, max_date) ISO strings across stored matches.
 

@@ -52,6 +52,10 @@ def _parse_players(rows, team_name):
         name = fix_encoding(row.get("name"))
         if not name:
             continue
+        # VLR reports first kills and deaths per side with the keys fk_t / fk_ct
+        # (T = attack, CT = defense), so the _t value is the attack total and the
+        # _ct value is the defense total, the same t/ct to atk/def convention the
+        # rounds use.
         players.append(
             {
                 "player_name": name,
@@ -67,6 +71,10 @@ def _parse_players(rows, team_name):
                 "hs_pct": (row.get("hs_pct") or "").strip() or None,
                 "first_kills": parse_int(row.get("fk")),
                 "first_deaths": parse_int(row.get("fd")),
+                "first_kills_atk": parse_int(row.get("fk_t")),
+                "first_kills_def": parse_int(row.get("fk_ct")),
+                "first_deaths_atk": parse_int(row.get("fd_t")),
+                "first_deaths_def": parse_int(row.get("fd_ct")),
             }
         )
     return players
@@ -216,8 +224,9 @@ def store_match_detail(conn, match_id, parsed):
                 INSERT INTO map_player_stats (
                     match_id, map_name, player_id, player_name, team_name, agent,
                     rating, acs, kills, deaths, assists, kast, adr, hs_pct,
-                    first_kills, first_deaths, fetched_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    first_kills, first_deaths, first_kills_atk, first_kills_def,
+                    first_deaths_atk, first_deaths_def, fetched_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     match_id, game["map_name"],
@@ -226,7 +235,9 @@ def store_match_detail(conn, match_id, parsed):
                     player["rating"], player["acs"], player["kills"],
                     player["deaths"], player["assists"], player["kast"],
                     player["adr"], player["hs_pct"], player["first_kills"],
-                    player["first_deaths"], now,
+                    player["first_deaths"], player["first_kills_atk"],
+                    player["first_kills_def"], player["first_deaths_atk"],
+                    player["first_deaths_def"], now,
                 ),
             )
         for rnd in game["rounds"]:
