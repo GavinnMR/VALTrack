@@ -16,12 +16,34 @@ def connect(db_path=DB_PATH):
     return conn
 
 
+# Columns added to existing tables after the first schema was shipped. The
+# executescript below creates missing tables, but CREATE TABLE IF NOT EXISTS
+# never alters a table that already exists, so new columns on an old table are
+# added here instead. Each entry is (table, column, definition).
+_ADDED_COLUMNS = [
+    ("matches", "map_vetos_raw", "TEXT"),
+    ("matches", "details_fetched_at", "TEXT"),
+]
+
+
+def _ensure_columns(conn):
+    """Add any columns missing from an existing database. Idempotent."""
+    for table, column, definition in _ADDED_COLUMNS:
+        existing = {
+            row["name"]
+            for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
 def init_db(db_path=DB_PATH):
     """Create any missing tables from schema.sql. Safe to call repeatedly."""
     schema = SCHEMA_PATH.read_text(encoding="utf-8")
     conn = connect(db_path)
     try:
         conn.executescript(schema)
+        _ensure_columns(conn)
         conn.commit()
     finally:
         conn.close()

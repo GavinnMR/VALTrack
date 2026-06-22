@@ -83,12 +83,33 @@ CREATE TABLE IF NOT EXISTS matches (
     team1_score INTEGER,
     team2_score INTEGER,
     winner_name TEXT,
+    map_vetos_raw      TEXT,    -- the raw veto string from the per-match pass
+    details_fetched_at TEXT,    -- set once the expensive per-match detail is stored
     fetched_at  TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_matches_team1 ON matches (team1_id);
 CREATE INDEX IF NOT EXISTS idx_matches_team2 ON matches (team2_id);
 CREATE INDEX IF NOT EXISTS idx_matches_date  ON matches (date);
+
+-- Parsed map veto sequence for a match, one row per action in order. Populated
+-- by the per-match pass (Build Step 5) from the match's veto string, and
+-- consumed by the veto and map-pool reconstruction (Build Step 11). The team is
+-- stored as the abbreviation VLR puts in the veto string (eg "PRX"), which is
+-- not always the team name, so Build Step 11 resolves it. A "remains" action
+-- (the last map left after picks and bans) has no team.
+CREATE TABLE IF NOT EXISTS match_vetos (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    match_id   INTEGER NOT NULL,
+    seq        INTEGER,           -- order within the veto, starting at 1
+    team_token TEXT,              -- the team abbreviation, null for "remains"
+    action     TEXT,              -- ban, pick, remains
+    map_name   TEXT,
+    fetched_at TEXT,
+    FOREIGN KEY (match_id) REFERENCES matches (match_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_match_vetos_match ON match_vetos (match_id);
 
 -- Per-map results within a match. Populated by the per-match pass (Build Step 5)
 -- and consumed by the side-split work (Build Step 6).
@@ -156,7 +177,11 @@ CREATE TABLE IF NOT EXISTS rounds (
 
 CREATE INDEX IF NOT EXISTS idx_rounds_match ON rounds (match_id);
 
--- Per-round economy detail. Drives eco and anti-eco conversion in Build Step 7.
+-- Per-round economy detail. Intended to drive eco and anti-eco conversion in
+-- Build Step 7, but left empty for now: vlrggapi's match detail returns only the
+-- first map's economy table for every map, so per-map economy is not reliably
+-- available from the data source yet. Pistol-round win rate is computed from the
+-- rounds table instead, which is reliable.
 CREATE TABLE IF NOT EXISTS economy (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     match_id     INTEGER NOT NULL,

@@ -69,3 +69,18 @@ class VlrClient:
         return self._get_v2_data(
             "/v2/team", {"id": str(team_id), "q": "matches", "page": page}
         )
+
+    def match_detail(self, match_id):
+        """Full per-match detail: per-map scores, player stats, rounds, vetos.
+
+        Returns the single detail segment, the object the parser consumes. The
+        v2 envelope wraps it as data.segments[0]; an empty segments list raises
+        so a caller never parses an empty match as a real one.
+        """
+        data = self._get_v2_data(
+            "/v2/match/details", {"match_id": str(match_id)}
+        )
+        segments = data.get("segments", [])
+        if not segments:
+            raise ApiError(f"match {match_id} returned no detail segment")
+        return segments[0]

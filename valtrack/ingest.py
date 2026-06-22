@@ -16,6 +16,7 @@ from valtrack import db
 from valtrack.api_client import ApiError, VlrClient
 from valtrack.cleaning import fix_encoding, parse_date, parse_int, parse_score
 from valtrack.franchise import LEAGUE_RANKING_REGIONS, iter_franchise_teams
+from valtrack.match_detail import parse_match_detail, store_match_detail
 
 
 def _now():
@@ -322,6 +323,87 @@ def link_match_teams(conn):
         "(SELECT id FROM teams WHERE name = matches.team2_name COLLATE NOCASE) "
         "WHERE team2_id IS NULL"
     )
+
+
+def matches_needing_detail(conn):
+    """match_ids that are decided but have no per-match detail stored yet.
+
+    A match is "done" once details_fetched_at is set, even when it parsed to zero
+    maps (a forfeit), so those are not refetched forever. Undecided matches with
+    no score are skipped, since there is no detail to pull. Newest first, because
+    recent matches are the most relevant to look at.
+    """
+    rows = conn.execute(
+        "SELECT match_id FROM matches "
+        "WHERE details_fetched_at IS NULL AND team1_score IS NOT NULL "
+        "ORDER BY date DESC, match_id DESC"
+    ).fetchall()
+    return [row["match_id"] for row in rows]
+
+
+def ingest_match_details(
+    client, conn, scope="full", limit=None, progress=print
+):
+    """The expensive per-match pass: pull detail for each match missing it.
+
+    One API call per match, so this is the bulk of the harvest time. It is
+    re-runnable and incremental-aware: it only touches matches without stored
+    detail, and commits per match so a failure partway through keeps finished
+    matches. Full and incremental select the same set (matches still lacking
+    detail); the scope name is kept for parity with run_ingest. limit caps how
+    many matches to process in one run, for batching or a quick smoke test.
+    """
+    if scope not in ("full", "incremental"):
+        raise ValueError(f"unknown scope: {scope}")
+
+    ids = matches_needing_detail(conn)
+    if limit is not None:
+        ids = ids[:limit]
+
+    summary = {"matches": 0, "maps": 0, "errors": []}
+    try:
+        for match_id in ids:
+            try:
+                segment = client.match_detail(match_id)
+                parsed = parse_match_detail(segment)
+                store_match_detail(conn, match_id, parsed)
+                conn.commit()  # per match, so a later failure keeps this one
+                summary["matches"] += 1
+                summary["maps"] += len(parsed["maps"])
+                progress(f"  ok match {match_id}: {len(parsed['maps'])} maps")
+            except ApiError as exc:
+                conn.rollback()
+                summary["errors"].append(match_id)
+                progress(f"  ! API error on match {match_id}: {exc}")
+
+        db.set_meta(conn, "last_updated", _now())
+        db.set_meta(conn, "last_status", "ok" if not summary["errors"] else "partial")
+        conn.commit()
+    except Exception:
+        db.set_meta(conn, "last_status", "failed")
+        conn.commit()
+        raise
+
+    return summary
+
+
+def run_detail_ingest(scope="full", client=None, db_path=db.DB_PATH,
+                      limit=None, progress=print):
+    """Open a connection and run the per-match detail pass over all teams.
+
+    The terminal entry point for the expensive pass. The cheap list-level harvest
+    (run_ingest) must have populated matches first.
+    """
+    if scope not in ("full", "incremental"):
+        raise ValueError(f"unknown scope: {scope}")
+
+    client = client or VlrClient()
+    db.init_db(db_path)
+    conn = db.connect(db_path)
+    try:
+        return ingest_match_details(client, conn, scope, limit, progress)
+    finally:
+        conn.close()
 
 
 def run_ingest(scope="full", client=None, db_path=db.DB_PATH, progress=print):

@@ -1,35 +1,35 @@
 """Terminal entry point for the VALTrack data harvest.
 
-This is the cheap, list-level pass: franchise teams, rankings, rosters, and
-match histories. It is safe to re-run and stop or fail partway through, since
-each team commits on its own.
+Two passes, selected with --pass:
+
+  cheap (default): the list-level pass. Franchise teams, rankings, rosters, and
+  match histories. Fast, and what an ongoing incremental refresh runs.
+
+  details: the expensive per-match pass. One API call per stored match to pull
+  per-map scores, player stats, rounds, and vetos. This is the bulk of the
+  harvest time. It only fetches matches that do not already have detail, so it
+  is safe to re-run and resume after a stop or failure.
+
+Run the cheap pass first so there are matches to pull detail for.
 
 Usage:
-    python harvest.py --scope full         one-time full load (slow)
-    python harvest.py --scope incremental  only new matches since last run
+    python harvest.py --pass cheap --scope full          one-time full load (slow)
+    python harvest.py --pass cheap --scope incremental   only new matches
+    python harvest.py --pass details                     fill detail for matches missing it
+    python harvest.py --pass details --limit 50          process only the newest 50
 
-The full per-match detail pass is a separate, later step. Make sure vlrggapi is
-running at http://127.0.0.1:3001 before harvesting.
+Make sure vlrggapi is running at http://127.0.0.1:3001 before harvesting.
 """
 import argparse
 import time
 
-from valtrack.ingest import run_ingest
+from valtrack.ingest import run_detail_ingest, run_ingest
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Harvest VLR data into SQLite.")
-    parser.add_argument(
-        "--scope",
-        choices=["full", "incremental"],
-        default="incremental",
-        help="full loads all history; incremental stops at known matches",
-    )
-    args = parser.parse_args()
-
-    print(f"starting {args.scope} harvest")
+def _run_cheap(scope):
+    print(f"starting cheap {scope} harvest")
     start = time.monotonic()
-    summary = run_ingest(scope=args.scope)
+    summary = run_ingest(scope=scope)
     elapsed = time.monotonic() - start
 
     print("")
@@ -40,6 +40,51 @@ def main():
         print(f"  unresolved names: {', '.join(summary['unresolved'])}")
     if summary["errors"]:
         print(f"  errors: {', '.join(summary['errors'])}")
+
+
+def _run_details(scope, limit):
+    print(f"starting detail {scope} harvest" + (f" (limit {limit})" if limit else ""))
+    start = time.monotonic()
+    summary = run_detail_ingest(scope=scope, limit=limit)
+    elapsed = time.monotonic() - start
+
+    print("")
+    print(f"done in {elapsed:.0f}s")
+    print(f"  matches detailed: {summary['matches']}")
+    print(f"  maps stored: {summary['maps']}")
+    if summary["errors"]:
+        shown = ", ".join(str(m) for m in summary["errors"][:20])
+        more = "" if len(summary["errors"]) <= 20 else f" (+{len(summary['errors']) - 20} more)"
+        print(f"  errors on {len(summary['errors'])} matches: {shown}{more}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Harvest VLR data into SQLite.")
+    parser.add_argument(
+        "--pass",
+        dest="which",
+        choices=["cheap", "details"],
+        default="cheap",
+        help="cheap is the list-level pass; details is the per-match pass",
+    )
+    parser.add_argument(
+        "--scope",
+        choices=["full", "incremental"],
+        default="incremental",
+        help="full loads all history; incremental stops at known matches",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="details only: cap how many matches to process in this run",
+    )
+    args = parser.parse_args()
+
+    if args.which == "cheap":
+        _run_cheap(args.scope)
+    else:
+        _run_details(args.scope, args.limit)
 
 
 if __name__ == "__main__":
