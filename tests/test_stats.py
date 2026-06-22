@@ -11,6 +11,7 @@ from valtrack.stats import (
     opening_duels,
     per_map_splits,
     pistol_winrate,
+    player_aggregates,
     side_winrates,
 )
 
@@ -383,3 +384,138 @@ def test_opening_duels_is_none_with_no_duels():
     assert out["atk_winrate"] is None
     assert out["def_winrate"] is None
     assert out["players"] == []
+
+
+# --- aggregated player statistics (Build Step 9) ----------------------------
+
+def _pstat(team, player, rounds, agent="Jett", rating=1.0, acs=200.0,
+           kills=0, deaths=0, assists=0, kast="70%", adr=140.0, hs_pct="20%",
+           first_kills=0, first_deaths=0):
+    """One per-map player line, shaped like a team_player_stats row."""
+    return {
+        "team_name": team,
+        "player_name": player,
+        "player_id": None,
+        "agent": agent,
+        "map_rounds": rounds,
+        "rating": rating,
+        "acs": acs,
+        "kills": kills,
+        "deaths": deaths,
+        "assists": assists,
+        "kast": kast,
+        "adr": adr,
+        "hs_pct": hs_pct,
+        "first_kills": first_kills,
+        "first_deaths": first_deaths,
+    }
+
+
+def test_player_aggregates_counts_are_summed_then_divided():
+    # ace plays two maps: a 20-round map and a 24-round map (44 rounds total).
+    rows = [
+        _pstat("A", "ace", 20, kills=18, deaths=12, assists=5,
+               first_kills=6, first_deaths=3),
+        _pstat("A", "ace", 24, kills=22, deaths=20, assists=7,
+               first_kills=4, first_deaths=5),
+    ]
+    out = player_aggregates(rows, "A")
+    assert len(out) == 1
+    ace = out[0]
+    assert ace["maps"] == 2
+    assert ace["rounds"] == 44
+    assert ace["kills"] == 40 and ace["deaths"] == 32 and ace["assists"] == 12
+    # K/D over totals, not a mean of per-map ratios.
+    assert ace["kd"] == 40 / 32
+    assert ace["kpr"] == 40 / 44
+    assert ace["apr"] == 12 / 44
+    assert ace["fk_per_round"] == 10 / 44
+    assert ace["fd_per_round"] == 8 / 44
+
+
+def test_player_aggregates_rate_stats_are_round_weighted():
+    # Two maps with different round counts, so a simple mean would be wrong.
+    rows = [
+        _pstat("A", "ace", 10, rating=1.0, acs=100.0, adr=100.0,
+               kast="60%", hs_pct="10%"),
+        _pstat("A", "ace", 30, rating=2.0, acs=300.0, adr=200.0,
+               kast="80%", hs_pct="30%"),
+    ]
+    out = player_aggregates(rows, "A")[0]
+    # Weighted by 10 and 30 rounds: (x*10 + y*30) / 40.
+    assert out["rating"] == (1.0 * 10 + 2.0 * 30) / 40
+    assert out["acs"] == (100.0 * 10 + 300.0 * 30) / 40
+    assert out["adr"] == (100.0 * 10 + 200.0 * 30) / 40
+    # KAST and HS% are parsed from their "75%" text before weighting.
+    assert out["kast"] == (60 * 10 + 80 * 30) / 40
+    assert out["hs_pct"] == (10 * 10 + 30 * 30) / 40
+
+
+def test_player_aggregates_skips_missing_value_and_unknown_rounds():
+    rows = [
+        # A blank rating must not pull the average toward zero.
+        _pstat("A", "ace", 20, rating=None, acs=200.0),
+        _pstat("A", "ace", 20, rating=1.5, acs=240.0),
+        # A map with an unknown round count drops out of round-weighted stats
+        # and out of the per-round denominators, but its kills still aggregate.
+        _pstat("A", "ace", None, rating=3.0, acs=999.0, kills=5),
+    ]
+    out = player_aggregates(rows, "A")[0]
+    # Rating averages only the one map that has a rating and a round count.
+    assert out["rating"] == 1.5
+    # ACS weights the two maps with known rounds equally (20 each).
+    assert out["acs"] == (200.0 + 240.0) / 2
+    # Rounds total ignores the unknown-round map; kills still count all three.
+    assert out["rounds"] == 40
+    assert out["kills"] == 5
+    assert out["kpr"] == 5 / 40
+
+
+def test_player_aggregates_agent_pool_and_per_agent():
+    rows = [
+        _pstat("A", "ace", 20, agent="Jett", rating=1.2, acs=240.0,
+               kills=20, deaths=10),
+        _pstat("A", "ace", 20, agent="Jett", rating=0.8, acs=160.0,
+               kills=10, deaths=14),
+        _pstat("A", "ace", 20, agent="Raze", rating=1.0, acs=200.0,
+               kills=15, deaths=15),
+    ]
+    out = player_aggregates(rows, "A")[0]
+    # Jett has two maps, Raze one, so Jett sorts first.
+    assert [a["agent"] for a in out["agents"]] == ["Jett", "Raze"]
+    jett = out["agents"][0]
+    assert jett["maps"] == 2
+    assert jett["kd"] == 30 / 24
+    assert jett["rating"] == (1.2 + 0.8) / 2  # equal round weights
+    assert jett["acs"] == (240.0 + 160.0) / 2
+    raze = out["agents"][1]
+    assert raze["maps"] == 1 and raze["kd"] == 15 / 15
+
+
+def test_player_aggregates_ignores_opponent_and_sorts_by_maps():
+    rows = [
+        _pstat("A", "ace", 20),
+        _pstat("A", "ace", 20),
+        _pstat("A", "bee", 20),
+        _pstat("B", "zee", 20),  # opponent, must not appear
+    ]
+    out = player_aggregates(rows, "A")
+    assert [p["player_name"] for p in out] == ["ace", "bee"]  # ace has 2 maps
+    assert out[0]["maps"] == 2 and out[1]["maps"] == 1
+
+
+def test_player_aggregates_none_when_nothing_to_divide():
+    # A single map with zero deaths and an unknown round count: every derived
+    # rate has an empty denominator, so each is None rather than a fake 0.
+    rows = [_pstat("A", "ace", None, rating=None, acs=None, kills=3, deaths=0)]
+    out = player_aggregates(rows, "A")[0]
+    assert out["kd"] is None
+    assert out["kpr"] is None
+    assert out["apr"] is None
+    assert out["rating"] is None
+    assert out["acs"] is None
+    assert out["agents"] == [] or out["agents"][0]["rating"] is None
+
+
+def test_player_aggregates_empty():
+    assert player_aggregates([], "A") == []

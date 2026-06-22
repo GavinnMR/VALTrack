@@ -225,6 +225,84 @@ def render_opening(conn, team, window):
     )
 
 
+def num1(value):
+    """A stat to one decimal, or a dash when we have nothing to show."""
+    return f"{value:.1f}" if value is not None else "-"
+
+
+def num2(value):
+    """A stat to two decimals (per-round figures), or a dash when unknown."""
+    return f"{value:.2f}" if value is not None else "-"
+
+
+def pct100(value):
+    """A 0..100 percentage stat as a whole-percent string, or a dash."""
+    return f"{value:.0f}%" if value is not None else "-"
+
+
+def render_player_stats(conn, team, window):
+    """Per-player aggregated statistics for the window, with a per-agent view.
+
+    Computed from the stored per-map player lines, so it only has figures where
+    per-match detail has been harvested. The rate stats (rating, ACS, ADR, KAST,
+    headshot percentage) are round-weighted across the player's maps; K/D and the
+    per-round figures are summed then divided. Maps and rounds are shown as the
+    sample size. Clutch statistics are not shown: the data source does not expose
+    them, so they are left out rather than guessed.
+    """
+    st.divider()
+    st.subheader("Player statistics")
+    rows = queries.team_player_stats(conn, team["id"], window)
+    players = stats.player_aggregates(rows, team["name"])
+    if not players:
+        st.caption(
+            "No per-map detail stored in this range. Run the detail harvest "
+            "(python harvest.py --pass details) to populate it."
+        )
+        return
+    table = []
+    for p in players:
+        table.append({
+            "Player": p["player_name"],
+            "Rating": num2(p["rating"]),
+            "ACS": num1(p["acs"]),
+            "K/D": num2(p["kd"]),
+            "KAST": pct100(p["kast"]),
+            "ADR": num1(p["adr"]),
+            "KPR": num2(p["kpr"]),
+            "APR": num2(p["apr"]),
+            "HS%": pct100(p["hs_pct"]),
+            "FKPR": num2(p["fk_per_round"]),
+            "FDPR": num2(p["fd_per_round"]),
+            "Maps": p["maps"],
+            "Rounds": p["rounds"],
+        })
+    st.dataframe(pd.DataFrame(table), hide_index=True)
+    with st.expander("Agent pool and per-agent performance"):
+        for p in players:
+            if not p["agents"]:
+                continue
+            st.caption(p["player_name"])
+            agent_rows = []
+            for a in p["agents"]:
+                agent_rows.append({
+                    "Agent": a["agent"],
+                    "Maps": a["maps"],
+                    "Rating": num2(a["rating"]),
+                    "ACS": num1(a["acs"]),
+                    "K/D": num2(a["kd"]),
+                })
+            st.dataframe(pd.DataFrame(agent_rows), hide_index=True)
+    st.caption(
+        "Rating, ACS, ADR, KAST, and HS% are round-weighted averages across the "
+        "player's maps; K/D, KPR, APR, and the first-kill and first-death per-round "
+        "rates are totals over the rounds played. HS% is round-weighted as an "
+        "approximation, since the source stores only the per-map percentage. Maps "
+        "and rounds are shown so a small sample is visible. Clutch statistics are "
+        "not available from the data source."
+    )
+
+
 def render_recent(conn, team, window):
     st.divider()
     st.subheader("Recent matches")
@@ -289,6 +367,7 @@ def render_team(conn, column, team, window):
         render_map_splits(conn, team, window)
         render_pistol(conn, team, window)
         render_opening(conn, team, window)
+        render_player_stats(conn, team, window)
         render_recent(conn, team, window)
         render_roster(conn, team)
 

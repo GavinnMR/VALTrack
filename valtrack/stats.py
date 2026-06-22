@@ -5,6 +5,7 @@ access, so they are cheap to unit test against known inputs. The later
 must-aggregate steps (side splits, pistol, opening duels) can add their pure
 logic here too.
 """
+from valtrack.cleaning import parse_float
 
 
 def _rate(won, total):
@@ -299,6 +300,140 @@ def opening_duels(player_rows, team_name):
     )
     result["players"] = players
     return result
+
+
+def _weighted_mean(pairs):
+    """Round-weighted mean of (value, weight) pairs, skipping missing pieces.
+
+    A pair contributes only when both the value and a positive weight are
+    present, so a blank stat or a map with an unknown round count never dilutes
+    the average. Returns None when nothing contributes, which is honest rather
+    than a fabricated 0. This is how the per-round rate stats (rating, ACS, ADR,
+    KAST, headshot percentage) are combined across a player's maps: each map's
+    figure is weighted by the rounds it was earned over, the way VLR itself sums
+    a player's season average.
+    """
+    num = den = 0.0
+    for value, weight in pairs:
+        if value is None or not weight:
+            continue
+        num += value * weight
+        den += weight
+    return num / den if den else None
+
+
+def _agent_block(agg):
+    """Shape one agent's accumulated counts into a display dict."""
+    return {
+        "maps": agg["maps"],
+        "kills": agg["kills"],
+        "deaths": agg["deaths"],
+        "kd": _rate(agg["kills"], agg["deaths"]),
+        "rating": _weighted_mean(agg["rating"]),
+        "acs": _weighted_mean(agg["acs"]),
+    }
+
+
+def player_aggregates(rows, team_name):
+    """Per-player aggregated stat lines for one team across the windowed maps.
+
+    Each row is one player on one map and needs team_name, player_name, agent,
+    the per-map rating / acs / kills / deaths / assists / kast / adr / hs_pct,
+    first_kills / first_deaths, and map_rounds (the map's total rounds). Rows for
+    the other team are ignored, so the caller can pass every player on a map.
+
+    Two kinds of figure come back. The counting stats are summed then divided,
+    which is exact: K/D is total kills over total deaths, kills and assists per
+    round are the totals over the rounds the player was on the server, and the
+    same for first-kill and first-death rates. The per-round rate stats (rating,
+    ACS, ADR, KAST percentage, headshot percentage) are round-weighted averages
+    of the per-map figures (see _weighted_mean), since each was already a
+    per-round number. KAST and headshot percentage arrive as text like "75%" and
+    are parsed before weighting. Headshot percentage is round-weighted as an
+    approximation: its true denominator is hits, which the source does not store.
+
+    Clutch statistics are not produced: the data source does not expose them, so
+    they are left out rather than invented.
+
+    A None stat is skipped from its own average without zeroing it, and a map
+    with an unknown round count drops out of the round-weighted and per-round
+    figures. Returns a list of per-player dicts sorted by maps played descending
+    then player name, each carrying the aggregated line, the maps and rounds
+    sample sizes, an agent pool (maps per agent), and a per-agent breakdown.
+    """
+    def num(value):
+        return value or 0
+
+    players = {}
+    for row in rows:
+        if row["team_name"] != team_name:
+            continue
+        name = row["player_name"]
+        acc = players.setdefault(name, {
+            "player_id": row["player_id"],
+            "maps": 0, "rounds": 0,
+            "kills": 0, "deaths": 0, "assists": 0,
+            "first_kills": 0, "first_deaths": 0,
+            "rating": [], "acs": [], "adr": [], "kast": [], "hs": [],
+            "agents": {},
+        })
+        rounds = row["map_rounds"]
+        acc["maps"] += 1
+        acc["rounds"] += num(rounds)
+        acc["kills"] += num(row["kills"])
+        acc["deaths"] += num(row["deaths"])
+        acc["assists"] += num(row["assists"])
+        acc["first_kills"] += num(row["first_kills"])
+        acc["first_deaths"] += num(row["first_deaths"])
+        acc["rating"].append((row["rating"], rounds))
+        acc["acs"].append((row["acs"], rounds))
+        acc["adr"].append((row["adr"], rounds))
+        acc["kast"].append((parse_float(row["kast"]), rounds))
+        acc["hs"].append((parse_float(row["hs_pct"]), rounds))
+
+        agent = row["agent"]
+        if agent:
+            ag = acc["agents"].setdefault(
+                agent, {"maps": 0, "kills": 0, "deaths": 0, "rating": [], "acs": []}
+            )
+            ag["maps"] += 1
+            ag["kills"] += num(row["kills"])
+            ag["deaths"] += num(row["deaths"])
+            ag["rating"].append((row["rating"], rounds))
+            ag["acs"].append((row["acs"], rounds))
+
+    out = []
+    for name, acc in players.items():
+        agents = sorted(
+            ((agent, _agent_block(ag)) for agent, ag in acc["agents"].items()),
+            key=lambda pair: (-pair[1]["maps"], pair[0]),
+        )
+        out.append({
+            "player_name": name,
+            "player_id": acc["player_id"],
+            "maps": acc["maps"],
+            "rounds": acc["rounds"],
+            "kills": acc["kills"],
+            "deaths": acc["deaths"],
+            "assists": acc["assists"],
+            "first_kills": acc["first_kills"],
+            "first_deaths": acc["first_deaths"],
+            "rating": _weighted_mean(acc["rating"]),
+            "acs": _weighted_mean(acc["acs"]),
+            "adr": _weighted_mean(acc["adr"]),
+            "kast": _weighted_mean(acc["kast"]),
+            "hs_pct": _weighted_mean(acc["hs"]),
+            "kd": _rate(acc["kills"], acc["deaths"]),
+            "kpr": _rate(acc["kills"], acc["rounds"]),
+            "apr": _rate(acc["assists"], acc["rounds"]),
+            "fk_per_round": _rate(acc["first_kills"], acc["rounds"]),
+            "fd_per_round": _rate(acc["first_deaths"], acc["rounds"]),
+            "agents": [
+                {"agent": agent, **block} for agent, block in agents
+            ],
+        })
+    out.sort(key=lambda p: (-p["maps"], p["player_name"]))
+    return out
 
 
 def per_map_splits(map_rows, round_rows, team_name):

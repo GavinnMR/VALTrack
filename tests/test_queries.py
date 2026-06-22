@@ -242,6 +242,65 @@ def test_team_detail_queries_empty_for_unknown_team(tmp_path):
     conn.close()
 
 
+def _add_map_result_scored(conn, match_id, map_name, t1_name, t2_name,
+                           t1_score, t2_score):
+    conn.execute(
+        """
+        INSERT INTO map_results (match_id, map_name, team1_name, team2_name,
+                                 team1_score, team2_score, winner_name)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (match_id, map_name, t1_name, t2_name, t1_score, t2_score,
+         t1_name if t1_score > t2_score else t2_name),
+    )
+
+
+def _add_player_stat(conn, match_id, map_name, player, team, agent="Jett",
+                     kills=0, deaths=0):
+    conn.execute(
+        """
+        INSERT INTO map_player_stats (match_id, map_name, player_name, team_name,
+                                      agent, rating, acs, kills, deaths, assists,
+                                      kast, adr, hs_pct, first_kills, first_deaths)
+        VALUES (?, ?, ?, ?, ?, 1.0, 200, ?, ?, 3, '70%', 140, '20%', 2, 1)
+        """,
+        (match_id, map_name, player, team, agent, kills, deaths),
+    )
+
+
+def test_team_player_stats_joins_round_count_and_windows(tmp_path):
+    from valtrack.queries import team_player_stats
+
+    conn = _fresh_conn(tmp_path)
+    _add_team(conn, 100, "Alpha")
+    _add_match(conn, 1, 100, 200, 2, 0, "2024-01-10")
+    _add_map_result_scored(conn, 1, "Ascent", "Alpha", "Beta", 13, 7)
+    _add_player_stat(conn, 1, "Ascent", "ace", "Alpha", kills=18, deaths=10)
+    _add_player_stat(conn, 1, "Ascent", "zee", "Beta", kills=12, deaths=16)
+    # A later match outside the window for the same team.
+    _add_match(conn, 2, 100, 200, 2, 1, "2024-09-10")
+    _add_map_result_scored(conn, 2, "Bind", "Alpha", "Beta", 13, 11)
+    _add_player_stat(conn, 2, "Bind", "ace", "Alpha", kills=20, deaths=18)
+    conn.commit()
+
+    rows = team_player_stats(conn, 100)
+    # Only Alpha's players come back (Beta's row is excluded by team_name).
+    assert sorted((r["player_name"], r["map_name"]) for r in rows) == [
+        ("ace", "Ascent"), ("ace", "Bind"),
+    ]
+    ascent = next(r for r in rows if r["map_name"] == "Ascent")
+    # The round count is both teams' scores summed from map_results.
+    assert ascent["map_rounds"] == 20
+    assert ascent["kills"] == 18
+
+    w = DateWindow(date(2024, 1, 1), date(2024, 6, 30))
+    windowed = team_player_stats(conn, 100, w)
+    assert [r["map_name"] for r in windowed] == ["Ascent"]
+
+    assert team_player_stats(conn, 999) == []
+    conn.close()
+
+
 def test_match_date_bounds(tmp_path):
     from valtrack.queries import match_date_bounds
 
