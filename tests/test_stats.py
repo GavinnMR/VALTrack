@@ -5,6 +5,7 @@ inputs: a streak must count the full current run, and the roster split must
 survive VLR's unreliable staff flag and its occasionally mangled role text.
 """
 from valtrack.stats import (
+    align_rosters,
     classify_roster,
     form_and_streak,
     map_winrates,
@@ -12,6 +13,7 @@ from valtrack.stats import (
     per_map_splits,
     pistol_winrate,
     player_aggregates,
+    primary_role,
     side_winrates,
 )
 
@@ -431,6 +433,9 @@ def test_player_aggregates_counts_are_summed_then_divided():
     assert ace["apr"] == 12 / 44
     assert ace["fk_per_round"] == 10 / 44
     assert ace["fd_per_round"] == 8 / 44
+    # Opening-duel win rate is first kills over opening duels (fk + fd).
+    assert ace["open_duels"] == 18
+    assert ace["open_winrate"] == 10 / 18
 
 
 def test_player_aggregates_rate_stats_are_round_weighted():
@@ -519,3 +524,76 @@ def test_player_aggregates_none_when_nothing_to_divide():
 
 def test_player_aggregates_empty():
     assert player_aggregates([], "A") == []
+
+
+# --- player versus player: role inference and alignment (Build Step 10) ------
+
+def _agent(name, maps):
+    return {"agent": name, "maps": maps}
+
+
+def _player(name, *agent_pairs):
+    """A minimal player_aggregates-shaped dict: name and an agent pool."""
+    return {"player_name": name, "agents": [_agent(a, m) for a, m in agent_pairs]}
+
+
+def test_primary_role_picks_most_played():
+    assert primary_role([_agent("Jett", 3), _agent("Sova", 1)]) == "duelist"
+    assert primary_role([_agent("Omen", 4), _agent("Killjoy", 2)]) == "controller"
+
+
+def test_primary_role_unknown_agent_tallies_as_unknown():
+    # A known role wins only when it actually has more maps than the unmapped one.
+    assert primary_role([_agent("Jett", 2), _agent("Mystery", 1)]) == "duelist"
+    assert primary_role([_agent("Jett", 1), _agent("Mystery", 3)]) == "unknown"
+
+
+def test_primary_role_empty_pool_is_unknown():
+    assert primary_role([]) == "unknown"
+
+
+def test_primary_role_tie_breaks_by_role_order():
+    # duelist precedes initiator in ROLE_ORDER, so an equal split favors duelist.
+    assert primary_role([_agent("Jett", 2), _agent("Sova", 2)]) == "duelist"
+
+
+def test_align_rosters_pairs_within_role_in_order():
+    a = [_player("aJett", ("Jett", 5)), _player("aSova", ("Sova", 5)),
+         _player("aOmen", ("Omen", 5))]
+    b = [_player("bRaze", ("Raze", 5)), _player("bBreach", ("Breach", 5)),
+         _player("bViper", ("Viper", 5))]
+    pairs = align_rosters(a, b)
+    assert [p["role"] for p in pairs] == ["duelist", "initiator", "controller"]
+    assert pairs[0]["a"]["player_name"] == "aJett"
+    assert pairs[0]["b"]["player_name"] == "bRaze"
+
+
+def test_align_rosters_uneven_counts_pad_with_none():
+    a = [_player("aJett", ("Jett", 5)), _player("aRaze", ("Raze", 3))]  # two duelists
+    b = [_player("bReyna", ("Reyna", 5))]                                # one duelist
+    pairs = align_rosters(a, b)
+    assert [p["role"] for p in pairs] == ["duelist", "duelist"]
+    assert pairs[0]["b"]["player_name"] == "bReyna"
+    # The extra duelist on A pairs against nobody.
+    assert pairs[1]["a"]["player_name"] == "aRaze" and pairs[1]["b"] is None
+
+
+def test_align_rosters_unknown_last_and_empty_roles_skipped():
+    a = [_player("aMystery", ("Mystery", 4))]  # unknown role
+    b = [_player("bJett", ("Jett", 5))]         # duelist
+    pairs = align_rosters(a, b)
+    # Only the two roles present appear; unknown sorts after duelist.
+    assert [p["role"] for p in pairs] == ["duelist", "unknown"]
+    assert pairs[0]["a"] is None and pairs[0]["b"]["player_name"] == "bJett"
+    assert pairs[1]["a"]["player_name"] == "aMystery" and pairs[1]["b"] is None
+
+
+def test_align_rosters_preserves_input_order_within_role():
+    # player_aggregates feeds players sorted by maps; alignment keeps that order.
+    a = [_player("first", ("Jett", 9)), _player("second", ("Raze", 2))]
+    pairs = align_rosters(a, [])
+    assert [p["a"]["player_name"] for p in pairs] == ["first", "second"]
+
+
+def test_align_rosters_empty_both_sides():
+    assert align_rosters([], []) == []

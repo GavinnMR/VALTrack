@@ -5,6 +5,7 @@ access, so they are cheap to unit test against known inputs. The later
 must-aggregate steps (side splits, pistol, opening duels) can add their pure
 logic here too.
 """
+from valtrack.agents import ROLE_ORDER, agent_role
 from valtrack.cleaning import parse_float
 
 
@@ -428,6 +429,13 @@ def player_aggregates(rows, team_name):
             "apr": _rate(acc["assists"], acc["rounds"]),
             "fk_per_round": _rate(acc["first_kills"], acc["rounds"]),
             "fd_per_round": _rate(acc["first_deaths"], acc["rounds"]),
+            # Opening-duel win rate (first kills over opening duels) at player
+            # level, the same ratio Build Step 8 reports, kept here so the
+            # player-versus-player view in Build Step 10 can read it directly.
+            "open_duels": acc["first_kills"] + acc["first_deaths"],
+            "open_winrate": _rate(
+                acc["first_kills"], acc["first_kills"] + acc["first_deaths"]
+            ),
             "agents": [
                 {"agent": agent, **block} for agent, block in agents
             ],
@@ -470,3 +478,64 @@ def per_map_splits(map_rows, round_rows, team_name):
         })
     rows.sort(key=lambda r: (-(r["won"] + r["lost"]), r["map_name"]))
     return rows
+
+
+def primary_role(agent_pool):
+    """Infer a player's role from their agent pool (most maps wins).
+
+    `agent_pool` is the per-player agent list from player_aggregates, each entry
+    {agent, maps, ...}. Each agent is mapped to a role (see valtrack.agents) and
+    the maps are tallied per role; the role with the most maps is the player's.
+    Agents the table does not know, and a player with no agents at all, fall
+    under "unknown" rather than being guessed into a real role. Ties break by
+    ROLE_ORDER so the result is deterministic.
+
+    This is a best-effort inference: the source gives agent usage, not an
+    explicit role, so a heavy flex player can land in a role they only narrowly
+    favor. The view labels it as inferred.
+    """
+    tally = {}
+    for entry in agent_pool:
+        role = agent_role(entry["agent"]) or "unknown"
+        tally[role] = tally.get(role, 0) + entry["maps"]
+    if not tally:
+        return "unknown"
+    return min(tally, key=lambda role: (-tally[role], ROLE_ORDER.index(role)))
+
+
+def align_rosters(team_a_players, team_b_players):
+    """Align two teams' players by inferred role for a head-to-head view.
+
+    Each argument is a player_aggregates list. Every player is tagged with
+    primary_role, grouped by role, and the two teams are paired position by
+    position within each role (each side already sorted by maps played, so the
+    most-used player in a role leads). When one team has more players in a role
+    than the other, the shorter side pairs against None. Roles are walked in
+    ROLE_ORDER, and a role where neither team has anyone is skipped.
+
+    Returns an ordered list of {role, a, b}, where a and b are the matched player
+    dicts (or None). The pairing is positional within a role, not a claim that
+    the two players play the exact same position; it just lines up like for like
+    so the user can compare comparable players.
+    """
+    def by_role(players):
+        groups = {}
+        for player in players:
+            role = primary_role(player["agents"])
+            groups.setdefault(role, []).append(player)
+        return groups
+
+    a_groups = by_role(team_a_players)
+    b_groups = by_role(team_b_players)
+
+    pairs = []
+    for role in ROLE_ORDER:
+        a_list = a_groups.get(role, [])
+        b_list = b_groups.get(role, [])
+        for i in range(max(len(a_list), len(b_list))):
+            pairs.append({
+                "role": role,
+                "a": a_list[i] if i < len(a_list) else None,
+                "b": b_list[i] if i < len(b_list) else None,
+            })
+    return pairs

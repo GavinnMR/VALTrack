@@ -303,6 +303,80 @@ def render_player_stats(conn, team, window):
     )
 
 
+def _pvp_side(player):
+    """The comparable headline figures for one side of a role pairing.
+
+    Returns blanks when the slot is empty (one team has fewer players in the
+    role), so the row still lines up.
+    """
+    if player is None:
+        return {"name": "", "rating": "-", "acs": "-", "kd": "-",
+                "kast": "-", "open": "-"}
+    return {
+        "name": player["player_name"],
+        "rating": num2(player["rating"]),
+        "acs": num1(player["acs"]),
+        "kd": num2(player["kd"]),
+        "kast": pct100(player["kast"]),
+        "open": pct(player["open_winrate"]),
+    }
+
+
+def render_player_vs_player(conn, team_a, team_b, window):
+    """Align the two rosters by inferred role and compare player against player.
+
+    Each player's role is inferred from their agent usage (see valtrack.agents),
+    then the two teams are paired within each role. The headline figures, rating,
+    ACS, K/D, KAST, and opening-duel win rate, are shown mirrored so like lines up
+    against like. Built on the same windowed per-map detail as the per-team
+    sections, so it only has figures where detail has been harvested.
+    """
+    st.divider()
+    st.header("Player versus player")
+    a_players = stats.player_aggregates(
+        queries.team_player_stats(conn, team_a["id"], window), team_a["name"]
+    )
+    b_players = stats.player_aggregates(
+        queries.team_player_stats(conn, team_b["id"], window), team_b["name"]
+    )
+    pairs = stats.align_rosters(a_players, b_players)
+    if not pairs:
+        st.caption(
+            "No per-map detail stored in this range for either team. Run the "
+            "detail harvest (python harvest.py --pass details) to populate it."
+        )
+        return
+    st.caption(f"{team_a['name']} (left) versus {team_b['name']} (right)")
+    rows = []
+    for pair in pairs:
+        a = _pvp_side(pair["a"])
+        b = _pvp_side(pair["b"])
+        rows.append({
+            "Role": pair["role"].capitalize(),
+            f"{team_a['tag'] or 'A'} player": a["name"],
+            "Rating ": a["rating"],
+            "ACS ": a["acs"],
+            "K/D ": a["kd"],
+            "KAST ": a["kast"],
+            "Open% ": a["open"],
+            " Open%": b["open"],
+            " KAST": b["kast"],
+            " K/D": b["kd"],
+            " ACS": b["acs"],
+            " Rating": b["rating"],
+            f"{team_b['tag'] or 'B'} player": b["name"],
+        })
+    st.dataframe(pd.DataFrame(rows), hide_index=True)
+    st.caption(
+        "Roles are inferred from each player's agent usage, not an explicit "
+        "source field, so they are best-effort. Players are paired position by "
+        "position within a role; an empty cell means one team had fewer players "
+        "in that role in this range. Opening-duel win rate is first kills over "
+        "opening duels. Figures rest on the windowed per-map detail, so a small "
+        "sample shows in the per-team player tables above."
+    )
+
+
 def render_recent(conn, team, window):
     st.divider()
     st.subheader("Recent matches")
@@ -414,6 +488,8 @@ def main():
         show_left, show_right = st.columns(2)
         render_team(conn, show_left, team_a, window)
         render_team(conn, show_right, team_b, window)
+
+        render_player_vs_player(conn, team_a, team_b, window)
     finally:
         conn.close()
 
