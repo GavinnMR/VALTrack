@@ -1,6 +1,11 @@
 # self-hosted data source, cloned locally and not part of this repo
 vlrggapi/
 
+# local development context, not published
+CLAUDE.md
+BUILD_STEPS.md
+PROMPTS.txt
+
 # generated local database
 *.db
 *.sqlite
