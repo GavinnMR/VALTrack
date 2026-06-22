@@ -12,6 +12,49 @@ drop it straight into a WHERE without special-casing the all-time case.
 from dataclasses import dataclass
 from datetime import date
 
+# Event-name fragments that mark an international LAN event. The data has no LAN
+# flag, so the environment is inferred from the event name, which is best effort:
+# these international events are played on LAN, while regional league play is
+# treated as the other bucket. Lowercased for a case-insensitive match.
+LAN_MARKERS = (
+    "masters", "champions", "lock//in", "lock in", "last chance", "lcq",
+)
+
+
+def is_lan_event(event_name):
+    """Best-effort guess of whether an event was played on LAN, from its name.
+
+    True when the name carries an international-LAN marker. A blank name is not
+    LAN. This is a heuristic over event text, not a stored flag, so the UI labels
+    it as inferred.
+    """
+    if not event_name:
+        return False
+    low = event_name.casefold()
+    return any(marker in low for marker in LAN_MARKERS)
+
+
+@dataclass(frozen=True)
+class EventFilter:
+    """A LAN/online filter that ANDs into a query the same way DateWindow does.
+
+    mode is "all" (no filter), "lan" (only inferred LAN events), or "online"
+    (everything else, including events with no name). The LAN test mirrors
+    is_lan_event in SQL. Like DateWindow this is all-qmark, since SQLite forbids
+    mixing named and positional parameters in one statement.
+    """
+    mode: str = "all"
+
+    def clause(self, column="event_name"):
+        if self.mode not in ("lan", "online"):
+            return ("1=1", [])
+        expr = f"LOWER(COALESCE({column}, ''))"
+        likes = " OR ".join(f"{expr} LIKE ?" for _ in LAN_MARKERS)
+        params = [f"%{m}%" for m in LAN_MARKERS]
+        if self.mode == "lan":
+            return (f"({likes})", params)
+        return (f"NOT ({likes})", params)
+
 
 @dataclass(frozen=True)
 class DateWindow:

@@ -11,10 +11,14 @@ Run with: streamlit run app.py
 import datetime as dt
 
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 
-from valtrack import db, queries, stats, veto
-from valtrack.window import DateWindow
+from valtrack import db, eras, queries, stats, veto
+from valtrack.window import DateWindow, EventFilter
+
+# A team is flagged stale once this many days pass with no match.
+STALE_DAYS = 42
 
 st.set_page_config(page_title="VALTrack", layout="wide")
 
@@ -82,8 +86,32 @@ def choose_window(conn):
     return DateWindow.all_time()
 
 
-def render_record_and_form(conn, team, window):
-    record = queries.team_record(conn, team["id"], window)
+def render_form_sparkline(results):
+    """A small Plotly sparkline of the running win-loss differential.
+
+    `results` is the decided results newest first. We chart the last stretch in
+    chronological order as a cumulative net (each win +1, each loss -1), so an
+    upward line is a team trending up. It is a shape, not a number, which is the
+    point of a sparkline.
+    """
+    recent = list(reversed(results[:15]))  # oldest to newest for the trend
+    net, series = 0, []
+    for r in recent:
+        net += 1 if r == "W" else -1
+        series.append(net)
+    fig = go.Figure(go.Scatter(y=series, mode="lines+markers"))
+    fig.update_layout(
+        height=120,
+        margin=dict(l=0, r=0, t=0, b=0),
+        showlegend=False,
+        xaxis=dict(visible=False),
+        yaxis=dict(title="net W-L", zeroline=True),
+    )
+    st.plotly_chart(fig, width="stretch")
+
+
+def render_record_and_form(conn, team, window, events):
+    record = queries.team_record(conn, team["id"], window, events)
     if record["decided"]:
         winpct = f"{100 * record['wins'] / record['decided']:.0f}%"
     else:
@@ -92,10 +120,12 @@ def render_record_and_form(conn, team, window):
     flag = flag_if_small(record["decided"], MIN_MATCHES)
     st.caption(f"{record['decided']} decided matches, win rate {winpct}{flag}")
 
-    fs = stats.form_and_streak(queries.decided_results(conn, team["id"], window))
+    results = queries.decided_results(conn, team["id"], window, events)
+    fs = stats.form_and_streak(results)
     if fs["decided"]:
         st.write("**Form** (most recent first): " + " ".join(fs["form"]))
         st.write(f"**Current streak:** {fs['streak_kind']}{fs['streak_len']}")
+        render_form_sparkline(results)
     else:
         st.write("**Form:** no decided matches in this range")
 
@@ -531,10 +561,10 @@ def render_player_vs_player(conn, team_a, team_b, window, five_only):
     )
 
 
-def render_recent(conn, team, window):
+def render_recent(conn, team, window, events):
     st.divider()
     st.subheader("Recent matches")
-    recent = queries.recent_matches(conn, team["id"], window, limit=10)
+    recent = queries.recent_matches(conn, team["id"], window, limit=10, events=events)
     if not recent:
         st.caption("No matches in this range.")
         return
@@ -616,7 +646,21 @@ def render_roster_timeline(conn, team, window):
     )
 
 
-def render_team(conn, column, team, window, five_only):
+def render_stale_flag(conn, team):
+    """Flag a team that has not played in a while, so frozen figures are clear."""
+    last = queries.last_match_date(conn, team["id"])
+    if not last:
+        return
+    days = (dt.date.today() - dt.date.fromisoformat(last)).days
+    if days >= STALE_DAYS:
+        weeks = days // 7
+        st.warning(
+            f"Stale data: last played {days} days ago ({last}), about {weeks} "
+            "weeks. These figures are effectively frozen."
+        )
+
+
+def render_team(conn, column, team, window, five_only, events):
     """Render one team's full comparison column."""
     with column:
         st.header(team["name"])
@@ -629,15 +673,16 @@ def render_team(conn, column, team, window, five_only):
         if team["logo"]:
             st.image(team["logo"], width=80)
 
+        render_stale_flag(conn, team)
         five_names = current_five_set(conn, team) if five_only else None
-        render_record_and_form(conn, team, window)
+        render_record_and_form(conn, team, window, events)
         render_snapshot(team)
         render_map_splits(conn, team, window)
         render_pistol(conn, team, window)
         render_opening(conn, team, window, five_names)
         render_player_stats(conn, team, window, five_names)
         render_roster_timeline(conn, team, window)
-        render_recent(conn, team, window)
+        render_recent(conn, team, window, events)
         render_roster(conn, team)
 
 
@@ -682,6 +727,33 @@ def main():
                 "be reassigned to the current roster."
             ),
         )
+        env = st.radio(
+            "Event type",
+            ["All", "International LAN", "Online/other"],
+            horizontal=True,
+            help=(
+                "LAN versus online is inferred from event names, so it is best-"
+                "effort. It narrows the match-level figures: record, form, and "
+                "recent matches."
+            ),
+        )
+        events = EventFilter(
+            {"All": "all", "International LAN": "lan", "Online/other": "online"}[env]
+        )
+
+        mn, mx = queries.match_date_bounds(conn)
+        if window.is_all_time:
+            span_start, span_end = mn, mx
+        else:
+            span_start = window.start.isoformat() if window.start else mn
+            span_end = window.end.isoformat() if window.end else mx
+        span = eras.patch_era_span(span_start, span_end)
+        if span:
+            st.info(
+                f"Patch era (rough): the displayed data spans {span}. Older data "
+                "may reflect different maps, agents, and metas, so read across a "
+                "wide range with care."
+            )
 
         team_a = queries.get_team(conn, teams[a]["id"])
         team_b = queries.get_team(conn, teams[b]["id"])
@@ -692,8 +764,8 @@ def main():
         render_veto_reconstruction(conn, team_a, team_b, window)
 
         show_left, show_right = st.columns(2)
-        render_team(conn, show_left, team_a, window, five_only)
-        render_team(conn, show_right, team_b, window, five_only)
+        render_team(conn, show_left, team_a, window, five_only, events)
+        render_team(conn, show_right, team_b, window, five_only, events)
 
         render_player_vs_player(conn, team_a, team_b, window, five_only)
     finally:

@@ -5,7 +5,7 @@ mirror it so Python-side use and the SQL filter agree on the edges.
 """
 from datetime import date
 
-from valtrack.window import DateWindow
+from valtrack.window import DateWindow, EventFilter, is_lan_event
 
 
 def test_all_time_clause_is_always_true():
@@ -56,3 +56,28 @@ def test_label():
     assert DateWindow(date(2024, 1, 1), date(2024, 6, 30)).label == (
         "2024-01-01 to 2024-06-30"
     )
+
+
+# --- LAN / online event filter (Build Step 14) ------------------------------
+
+def test_is_lan_event_detects_international_markers():
+    assert is_lan_event("Champions Tour 2024: Masters Madrid") is True
+    assert is_lan_event("Valorant Champions 2024") is True
+    assert is_lan_event("VCT 2025: EMEA Stage 2 Playoffs") is False
+    assert is_lan_event("") is False
+    assert is_lan_event(None) is False
+
+
+def test_event_filter_all_is_noop():
+    sql, params = EventFilter("all").clause("event_name")
+    assert sql == "1=1" and params == []
+
+
+def test_event_filter_lan_and_online_are_complementary():
+    lan_sql, lan_params = EventFilter("lan").clause("event_name")
+    on_sql, on_params = EventFilter("online").clause("event_name")
+    # Same bound params, online is the negation of the LAN match.
+    assert lan_params == on_params
+    assert on_sql == f"NOT {lan_sql}"
+    # All-qmark, no named params, so it composes with the date window.
+    assert lan_params.count("%masters%") == 1
