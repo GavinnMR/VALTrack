@@ -145,7 +145,7 @@ def active_pool(tend_a, tend_b, size=7, recent_days=365):
 
 def _blank():
     return {"appearances": 0, "bans": 0, "picks": 0,
-            "ban_rate": None, "pick_rate": None}
+            "ban_rate": None, "pick_rate": None, "last_seen": None}
 
 
 def reconstruct(tend_a, tend_b, pool):
@@ -181,12 +181,18 @@ def reconstruct(tend_a, tend_b, pool):
         play[name] = score
         pick_a[name] = ap
         pick_b[name] = bp
+        # The most recent time either team had this map in a veto, so the view can
+        # flag a map whose win-rate sample is frozen because it left the rotation
+        # (a high win rate on a map untouched since a prior patch is exactly the
+        # stale number the data-honesty principle exists to surface).
+        seens = [s for s in (a.get("last_seen"), b.get("last_seen")) if s]
         rows.append({
             "map": name,
             "a_pick_rate": a["pick_rate"], "a_ban_rate": a["ban_rate"],
             "b_pick_rate": b["pick_rate"], "b_ban_rate": b["ban_rate"],
             "a_appearances": a["appearances"], "b_appearances": b["appearances"],
             "play_score": score,
+            "last_seen": max(seens) if seens else None,
         })
     rows.sort(key=lambda r: (-r["play_score"], r["map"]))
 

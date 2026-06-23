@@ -611,3 +611,125 @@ def test_team_window_summary(tmp_path):
     assert s["total"] == 3 and s["decided"] == 1
     assert s["min_date"] == "2024-01-10" and s["max_date"] == "2024-05-10"
     conn.close()
+
+
+def test_team_record_stage_filter(tmp_path):
+    from valtrack.queries import team_record
+    from valtrack.window import StageFilter
+
+    conn = _fresh_conn(tmp_path)
+    me, opp = 100, 200
+    _add_match(conn, 1, me, opp, 2, 0, "2024-01-10")   # group win
+    _add_match(conn, 2, me, opp, 0, 2, "2024-02-10")   # playoff loss
+    _add_match(conn, 3, me, opp, 2, 1, "2024-03-10")   # unclassified win
+    conn.execute("UPDATE matches SET match_stage = 'group' WHERE match_id = 1")
+    conn.execute("UPDATE matches SET match_stage = 'playoff' WHERE match_id = 2")
+    conn.execute("UPDATE matches SET match_stage = 'unknown' WHERE match_id = 3")
+    conn.commit()
+
+    assert team_record(conn, me) == {"wins": 2, "losses": 1, "decided": 3}
+    g = team_record(conn, me, stage=StageFilter("group"))
+    assert g == {"wins": 1, "losses": 0, "decided": 1}
+    p = team_record(conn, me, stage=StageFilter("playoff"))
+    assert p == {"wins": 0, "losses": 1, "decided": 1}
+    conn.close()
+
+
+def test_team_rounds_carry_match_round_and_opp_rank(tmp_path):
+    from valtrack.queries import team_rounds
+
+    conn = _fresh_conn(tmp_path)
+    _add_team(conn, 100, "Alpha")
+    _add_team(conn, 200, "Beta")
+    conn.execute("UPDATE teams SET regional_rank = 5 WHERE id = 200")
+    _add_match(conn, 1, 100, 200, 1, 0, "2024-01-10")
+    _add_map_result(conn, 1, "Ascent", "Alpha", "Beta", "Alpha")
+    conn.execute(
+        "INSERT INTO rounds (match_id, map_name, round_number, winner_side, "
+        "winner_team, is_pistol) VALUES (1, 'Ascent', 1, 'atk', 'Alpha', 1)"
+    )
+    conn.commit()
+    rows = team_rounds(conn, 100)
+    assert rows[0]["match_id"] == 1 and rows[0]["round_number"] == 1
+    # The opponent (Beta) has regional rank 5, surfaced for the by-tier split.
+    assert rows[0]["opp_rank"] == 5
+    conn.close()
+
+
+def test_team_map_results_carry_scores_and_opp_rank(tmp_path):
+    from valtrack.queries import team_map_results
+
+    conn = _fresh_conn(tmp_path)
+    _add_team(conn, 100, "Alpha")
+    _add_team(conn, 200, "Beta")
+    conn.execute("UPDATE teams SET regional_rank = 8 WHERE id = 200")
+    _add_match(conn, 1, 100, 200, 1, 0, "2024-01-10")
+    _add_map_result_scored(conn, 1, "Ascent", "Alpha", "Beta", 13, 7)
+    conn.commit()
+    row = team_map_results(conn, 100)[0]
+    assert row["team1_score"] == 13 and row["team2_score"] == 7
+    assert row["opp_rank"] == 8
+    conn.close()
+
+
+def test_head_to_head_maps(tmp_path):
+    from valtrack.queries import head_to_head_maps
+
+    conn = _fresh_conn(tmp_path)
+    _add_team(conn, 100, "Alpha")
+    _add_team(conn, 200, "Beta")
+    # Two meetings; Bind played in both, Ascent once.
+    _add_named_match(conn, 1, 100, "Alpha", 200, "Beta", 2, 1, "2024-01-10")
+    _add_ordered_map(conn, 1, 1, "Bind", "Alpha", "Beta", "Alpha")
+    _add_ordered_map(conn, 1, 2, "Ascent", "Alpha", "Beta", "Beta")
+    _add_named_match(conn, 2, 200, "Beta", 100, "Alpha", 2, 0, "2024-05-10")
+    _add_ordered_map(conn, 2, 1, "Bind", "Beta", "Alpha", "Beta")
+    conn.commit()
+    rows = {r["map_name"]: r for r in head_to_head_maps(conn, 100, 200)}
+    # Bind: played twice, Alpha won one, Beta won one, last played 2024-05-10.
+    assert rows["Bind"]["played"] == 2
+    assert rows["Bind"]["a_wins"] == 1 and rows["Bind"]["b_wins"] == 1
+    assert rows["Bind"]["last_date"] == "2024-05-10"
+    assert rows["Ascent"]["played"] == 1 and rows["Ascent"]["b_wins"] == 1
+    # No detail stored is the honest empty state.
+    assert head_to_head_maps(conn, 100, 999) == []
+    conn.close()
+
+
+def test_team_rest_load(tmp_path):
+    from valtrack.queries import team_rest_load
+
+    conn = _fresh_conn(tmp_path)
+    _add_team(conn, 100, "Alpha")
+    _add_match(conn, 1, 100, 200, 2, 0, "2026-06-20")   # within 14 days of "today"
+    _add_map_result(conn, 1, "Ascent", "Alpha", "Beta", "Alpha")
+    _add_map_result(conn, 1, "Bind", "Alpha", "Beta", "Alpha")
+    _add_match(conn, 2, 100, 200, 2, 1, "2026-06-01")   # within 30, not 14
+    _add_map_result(conn, 2, "Lotus", "Alpha", "Beta", "Alpha")
+    _add_match(conn, 3, 100, 200, 2, 0, "2026-01-01")   # long ago
+    conn.commit()
+    today = date(2026, 6, 23)
+    out = team_rest_load(conn, 100, today=today)
+    assert out["last_date"] == "2026-06-20" and out["days_since"] == 3
+    assert out["matches_14"] == 1 and out["matches_30"] == 2
+    assert out["maps_14"] == 2 and out["maps_30"] == 3
+    conn.close()
+
+
+def test_last_roster_change_date(tmp_path):
+    from valtrack.queries import last_roster_change_date
+
+    conn = _fresh_conn(tmp_path)
+    _add_team(conn, 100, "Alpha")
+    # a1 debuted long ago, a2 (a new starter) debuted recently.
+    _add_match(conn, 1, 100, 200, 2, 0, "2024-01-10")
+    _add_player_stat(conn, 1, "Ascent", "a1", "Alpha")
+    _add_match(conn, 2, 100, 200, 2, 0, "2026-05-01")
+    _add_player_stat(conn, 2, "Bind", "a1", "Alpha")
+    _add_player_stat(conn, 2, "Bind", "a2", "Alpha")
+    conn.commit()
+    five = {"a1", "a2"}
+    # The newest current starter (a2) debuted 2026-05-01, the approx last change.
+    assert last_roster_change_date(conn, 100, five) == "2026-05-01"
+    assert last_roster_change_date(conn, 100, set()) is None
+    conn.close()

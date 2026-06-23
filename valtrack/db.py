@@ -24,6 +24,7 @@ _ADDED_COLUMNS = [
     ("matches", "map_vetos_raw", "TEXT"),
     ("matches", "details_fetched_at", "TEXT"),
     ("matches", "match_format", "TEXT"),
+    ("matches", "match_stage", "TEXT"),
     ("map_player_stats", "first_kills_atk", "INTEGER"),
     ("map_player_stats", "first_kills_def", "INTEGER"),
     ("map_player_stats", "first_deaths_atk", "INTEGER"),
@@ -31,6 +32,7 @@ _ADDED_COLUMNS = [
     ("map_player_stats", "clutch_won", "INTEGER"),
     ("map_player_stats", "clutch_lost", "INTEGER"),
     ("matchup_log", "outcome_side", "TEXT"),
+    ("matchup_log", "predicted_side", "TEXT"),
 ]
 
 
@@ -87,6 +89,7 @@ CREATE TABLE IF NOT EXISTS matchup_log (
     team_b_name  TEXT,
     note         TEXT,
     confidence   TEXT,
+    predicted_side TEXT,
     outcome      TEXT,
     outcome_side TEXT,
     created_at   TEXT,
@@ -114,6 +117,32 @@ def ensure_app_tables(conn):
     """Create the local notes and matchup-log tables if missing. Idempotent."""
     conn.executescript(_APP_TABLES_SQL)
     conn.commit()
+
+
+def backfill_match_stage(conn):
+    """Classify the stage (group/playoff/unknown) of any match missing one.
+
+    The event-stage filter reads matches.match_stage, but the classifier lives in
+    Python (the round labels are too varied for a clean SQL rule), so the column
+    is filled here. Only rows with a NULL stage are touched, so the first run
+    classifies the whole table once and later runs only pick up newly ingested
+    matches; an unclassifiable label is stored as "unknown" rather than left NULL
+    so it is not rescanned every startup. Safe to call on every app launch.
+    """
+    from valtrack.window import classify_stage
+
+    rows = conn.execute(
+        "SELECT match_id, event_round, event_name FROM matches "
+        "WHERE match_stage IS NULL"
+    ).fetchall()
+    for row in rows:
+        stage = classify_stage(row["event_round"], row["event_name"]) or "unknown"
+        conn.execute(
+            "UPDATE matches SET match_stage = ? WHERE match_id = ?",
+            (stage, row["match_id"]),
+        )
+    if rows:
+        conn.commit()
 
 
 def set_meta(conn, key, value):

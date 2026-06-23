@@ -86,6 +86,7 @@ CREATE TABLE IF NOT EXISTS matches (
     map_vetos_raw      TEXT,    -- the raw veto string from the per-match pass
     details_fetched_at TEXT,    -- set once the expensive per-match detail is stored
     match_format       TEXT,    -- bo1, bo3, bo5; inferred from the maps played
+    match_stage        TEXT,    -- group, playoff, unknown; classified from the round label
     fetched_at  TEXT
 );
 
@@ -238,12 +239,13 @@ CREATE TABLE IF NOT EXISTS matchup_log (
     team_a_name  TEXT,
     team_b_id    INTEGER,
     team_b_name  TEXT,
-    note         TEXT,
-    confidence   TEXT,
-    outcome      TEXT,          -- null until the user records the result
-    outcome_side TEXT,          -- structured winner, "a" or "b", null until resolved
-    created_at   TEXT,
-    resolved_at  TEXT
+    note          TEXT,
+    confidence    TEXT,
+    predicted_side TEXT,         -- the team the user leaned toward, "a" or "b", for calibration
+    outcome       TEXT,          -- null until the user records the result
+    outcome_side  TEXT,          -- structured winner, "a" or "b", null until resolved
+    created_at    TEXT,
+    resolved_at   TEXT
 );
 
 -- Saved (favorite) matchups for one-click reload, keyed by the order-independent

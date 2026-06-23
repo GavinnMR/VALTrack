@@ -70,6 +70,17 @@ class VlrClient:
             "/v2/team", {"id": str(team_id), "q": "matches", "page": page}
         )
 
+    def upcoming_matches(self):
+        """Upcoming matches from the VLR homepage, as a list of segments.
+
+        Each segment carries team1, team2, match_event, match_series, a
+        time_until_match string, and a unix_timestamp. Used only to pre-fill the
+        upcoming-match tag when the two selected teams are scheduled to play, so a
+        failure here is never fatal: the caller falls back to manual entry.
+        """
+        data = self._get_v2_data("/v2/match", {"q": "upcoming"})
+        return data.get("segments", [])
+
     def match_detail(self, match_id):
         """Full per-match detail: per-map scores, player stats, rounds, vetos.
 

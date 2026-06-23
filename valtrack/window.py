@@ -9,6 +9,7 @@ A window is a pair of inclusive bounds, each optional. All time leaves both
 bounds open. The clause is always a valid boolean expression, so callers can
 drop it straight into a WHERE without special-casing the all-time case.
 """
+import re
 from dataclasses import dataclass
 from datetime import date
 
@@ -32,6 +33,92 @@ def is_lan_event(event_name):
         return False
     low = event_name.casefold()
     return any(marker in low for marker in LAN_MARKERS)
+
+
+# Stage classification (event-stage filter). The round label tells us whether a
+# match is group/swiss play or a playoff/elimination bracket game, but VLR's
+# labels vary wildly across years and formats (clean tokens like "UBSF", event
+# names concatenated onto the round like "VCT NA S1: MastersGF", and full words
+# like "Lower Bracket Final"). So this is a heuristic, mirroring is_lan_event:
+# confident labels land in a bucket, anything ambiguous stays unclassified and is
+# left out of both buckets rather than guessed into one.
+
+# Whole-word substrings that confidently mark a playoff or single-elimination
+# bracket game, checked against the lowercased round text (and the event name as
+# a backup). Elimination and deciders count as playoff: they are knockout games.
+_PLAYOFF_WORDS = (
+    "playoff", "play-off", "play off", "grand final", "grand-final",
+    "lower bracket", "upper bracket", "lower round", "upper round",
+    "quarterfinal", "quarter-final", "quarter final",
+    "semifinal", "semi-final", "semi final",
+    "elimination", "elim", "knockout", "knock-out", "round of", "decider",
+    "bracket", "3rd place", "third place", "bronze", "final round",
+)
+# Bracket abbreviations that are three or more characters are safe to match
+# anywhere in the round text, since they do not collide with real words and
+# survive the occasional trailing "(B)" group letter ("UBF (B)"). The two-letter
+# finals codes (uf/lf/gf/qf/sf/cf) are too easy to hit by accident, so those are
+# anchored to the end of the round token instead, where VLR puts them (often
+# glued onto an event name, "...MastersGF").
+_PLAYOFF_ABBREV = re.compile(
+    r"(ubqf|ubsf|ubro\d*|ubr\d*|ubf|lbf|lbr\d*|lr\d+|ur\d+|uro\d*|uqf|usf|"
+    r"ro\d+|mbf|mr\d+)"
+)
+_PLAYOFF_SUFFIX = re.compile(r"(uf|lf|gf|qf|sf|cf)$")
+# Whole-word substrings that confidently mark group or swiss play (the regular
+# season and the 0-0 / winners side of a swiss stage, which are not knockout).
+_GROUP_WORDS = (
+    "group", "swiss", "round robin", "round-robin", "regular season",
+    "opening", "winner", "week",
+)
+# Trailing abbreviations for group/swiss: a week token ("W3") or round robin.
+_GROUP_SUFFIX = re.compile(r"(w\d+|rr)$")
+
+
+def classify_stage(event_round, event_name=None):
+    """Bucket a match into "group", "playoff", or None (unclassified).
+
+    Reads the round label first and falls back to the event name. Playoff and
+    elimination (including swiss deciders and elimination matches) are one bucket;
+    group and swiss non-elimination play (regular season, opening, winners) are
+    the other. Anything that does not match a confident marker returns None, so
+    the caller can keep it out of both buckets rather than mislabel it.
+
+    The order matters: playoff markers are checked before group markers, so a
+    "Group A GF" (a group's bracket final) lands in playoff, which is the more
+    specific and decision-relevant read.
+    """
+    parts = [p for p in (event_round, event_name) if p]
+    if not parts:
+        return None
+    text = " ".join(parts).casefold().strip()
+    token = (event_round or "").casefold().strip()
+    if (any(word in text for word in _PLAYOFF_WORDS)
+            or _PLAYOFF_ABBREV.search(token) or _PLAYOFF_SUFFIX.search(token)):
+        return "playoff"
+    if any(word in text for word in _GROUP_WORDS) or _GROUP_SUFFIX.search(token):
+        return "group"
+    return None
+
+
+@dataclass(frozen=True)
+class StageFilter:
+    """A group/playoff filter that ANDs into a query like DateWindow does.
+
+    mode is "all" (no filter), "group" (group and swiss play), or "playoff"
+    (playoff and elimination brackets). The stage is precomputed once into the
+    matches.match_stage column (see classify_stage and the startup backfill), so
+    the SQL is a plain equality. A match the classifier could not place has a NULL
+    stage and is therefore excluded from both the group and playoff buckets, the
+    same way an unknown-event match is excluded from LAN and online; "all" still
+    includes it.
+    """
+    mode: str = "all"
+
+    def clause(self, column="match_stage"):
+        if self.mode not in ("group", "playoff"):
+            return ("1=1", [])
+        return (f"{column} = ?", [self.mode])
 
 
 @dataclass(frozen=True)

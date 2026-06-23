@@ -51,16 +51,23 @@ def save_note(conn, team_a_id, team_b_id, body):
 
 
 def add_log_entry(conn, team_a_id, team_a_name, team_b_id, team_b_name,
-                  note, confidence):
-    """Record a new matchup log entry, outcome left open for later."""
+                  note, confidence, predicted_side=None):
+    """Record a new matchup log entry, outcome left open for later.
+
+    `predicted_side` is the team the user leaned toward ("a" or "b", or None when
+    they would rather not commit). It is what later makes the calibration readout
+    possible: once the outcome is recorded, a prediction can be scored as right or
+    wrong at the confidence the user gave it.
+    """
     conn.execute(
         """
         INSERT INTO matchup_log (
             team_a_id, team_a_name, team_b_id, team_b_name,
-            note, confidence, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            note, confidence, predicted_side, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (team_a_id, team_a_name, team_b_id, team_b_name, note, confidence, _now()),
+        (team_a_id, team_a_name, team_b_id, team_b_name, note, confidence,
+         predicted_side, _now()),
     )
     conn.commit()
 

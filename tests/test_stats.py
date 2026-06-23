@@ -6,30 +6,38 @@ survive VLR's unreliable staff flag and its occasionally mangled role text.
 """
 from valtrack.stats import (
     align_rosters,
+    calibration,
     canonical_player_name,
     classify_roster,
     clutch_stats,
     current_five_names,
     economy_conversion,
+    field_summary,
     form_and_streak,
     infer_match_format,
     is_small_sample,
     keep_players,
+    lineup_continuity,
     map_compositions,
     map_duel_board,
     map_pool_overlap,
     map_winrates,
+    margin_profile,
     merge_player_aliases,
     opening_duels,
+    partition_by_tier,
     per_map_splits,
+    percentile,
     pistol_winrate,
     player_aggregates,
     player_map_aggregates,
+    post_pistol_conversion,
     pressure_stats,
     primary_role,
     rank_metric_gaps,
     side_winrates,
     team_rating,
+    tier_of_rank,
     wilson_interval,
 )
 
@@ -970,3 +978,205 @@ def test_merge_player_aliases_unifies_variants_to_one_display():
     assert names[3] is None
     # And aggregating now sees one player, not two.
     assert len({canonical_player_name(n) for n in names if n}) == 1
+
+
+# --- round-after-pistol conversion (v2 batch 1, item 1) ---------------------
+
+def _pro_round(match_id, map_name, rn, winner, pistol=False):
+    return {"match_id": match_id, "map_name": map_name, "round_number": rn,
+            "winner_team": winner, "is_pistol": pistol}
+
+
+def test_post_pistol_conversion_hand_checked():
+    # A wins the round-1 pistol then wins round 2 (a conversion); A loses the
+    # round-13 pistol then wins round 14 anyway (a recovery / break).
+    rows = [
+        _pro_round("m1", "Ascent", 1, "A", pistol=True),
+        _pro_round("m1", "Ascent", 2, "A"),
+        _pro_round("m1", "Ascent", 13, "B", pistol=True),
+        _pro_round("m1", "Ascent", 14, "A"),
+    ]
+    out = post_pistol_conversion(rows, "A")
+    assert out["won_pistols"] == 1 and out["won_then_won"] == 1
+    assert out["won_conv_rate"] == 1.0
+    assert out["lost_pistols"] == 1 and out["lost_then_won"] == 1
+    assert out["lost_recover_rate"] == 1.0
+
+
+def test_post_pistol_conversion_groups_per_map_and_skips_missing_next():
+    rows = [
+        # Map 1: won pistol, lost round 2.
+        _pro_round("m1", "Ascent", 1, "A", pistol=True),
+        _pro_round("m1", "Ascent", 2, "B"),
+        # Map 2 (same map name, different match): lost pistol, lost round 2.
+        _pro_round("m2", "Ascent", 1, "B", pistol=True),
+        _pro_round("m2", "Ascent", 2, "B"),
+        # A pistol with no stored next round contributes nothing.
+        _pro_round("m2", "Ascent", 13, "A", pistol=True),
+    ]
+    out = post_pistol_conversion(rows, "A")
+    assert out["won_pistols"] == 1 and out["won_then_won"] == 0
+    assert out["lost_pistols"] == 1 and out["lost_then_won"] == 0
+    assert out["won_conv_rate"] == 0.0 and out["lost_recover_rate"] == 0.0
+
+
+def test_post_pistol_conversion_empty():
+    out = post_pistol_conversion([], "A")
+    assert out["won_pistols"] == 0 and out["won_conv_rate"] is None
+
+
+# --- close-game and round-margin profile (v2 batch 1, item 4) ---------------
+
+def _scored_map(map_name, t1, t2, us, them):
+    winner = t1 if us > them else t2
+    return {"map_name": map_name, "team1_name": t1, "team2_name": t2,
+            "team1_score": us, "team2_score": them, "winner_name": winner}
+
+
+def test_margin_profile_hand_checked():
+    rows = [
+        _scored_map("Ascent", "A", "B", 13, 5),    # comfortable win, margin 8
+        _scored_map("Bind", "A", "B", 13, 11),     # close win, margin 2
+        _scored_map("Lotus", "A", "B", 14, 12),    # overtime win, close
+        _scored_map("Split", "B", "A", 13, 9),     # loss by 4 (A is team2)
+    ]
+    out = margin_profile(rows, "A")
+    assert out["maps"] == 4
+    # Close: Bind (2) and Lotus (OT, margin 2) are within two rounds, both won.
+    assert out["close_played"] == 2 and out["close_won"] == 2
+    assert out["close_winrate"] == 1.0
+    # Overtime: only Lotus (the loser finished on 12+).
+    assert out["ot_played"] == 1 and out["ot_won"] == 1
+    # Winning margins 8, 2, 2 -> mean 4; the one loss margin is 4.
+    assert out["avg_win_margin"] == 4.0
+    assert out["avg_loss_margin"] == 4.0
+
+
+def test_margin_profile_skips_undecided_and_foreign_rows():
+    rows = [
+        _scored_map("Ascent", "A", "B", 13, 7),
+        {"map_name": "Bind", "team1_name": "A", "team2_name": "B",
+         "team1_score": None, "team2_score": None, "winner_name": None},
+        _scored_map("Lotus", "C", "D", 13, 4),   # A not in this map
+    ]
+    out = margin_profile(rows, "A")
+    assert out["maps"] == 1
+
+
+# --- prediction calibration on the matchup log (v2 batch 1, item 6) ---------
+
+def _log(conf, pred, outcome):
+    return {"confidence": conf, "predicted_side": pred, "outcome_side": outcome}
+
+
+def test_calibration_buckets_by_confidence_and_scores_hits():
+    entries = [
+        _log("high", "a", "a"),     # correct
+        _log("high", "a", "b"),     # wrong
+        _log("high", "b", "b"),     # correct
+        _log("low", "a", "b"),      # wrong
+        _log("medium", "a", None),  # unresolved, ignored
+        _log("medium", None, "a"),  # no prediction, ignored
+    ]
+    out = calibration(entries)
+    assert out["resolved"] == 4 and out["correct"] == 2
+    assert out["rate"] == 0.5
+    buckets = {b["confidence"]: b for b in out["buckets"]}
+    assert buckets["high"]["resolved"] == 3 and buckets["high"]["correct"] == 2
+    assert buckets["low"]["resolved"] == 1 and buckets["low"]["correct"] == 0
+    # Buckets are ordered low to high confidence.
+    assert [b["confidence"] for b in out["buckets"]] == ["low", "high"]
+
+
+def test_calibration_empty():
+    out = calibration([])
+    assert out == {"buckets": [], "resolved": 0, "correct": 0, "rate": None}
+
+
+# --- lineup continuity for the window (v2 batch 1, item 3) ------------------
+
+def _pmap(match_id, map_name, player):
+    return {"match_id": match_id, "map_name": map_name, "team_name": "A",
+            "player_name": player}
+
+
+def test_lineup_continuity_counts_maps_played_by_current_five_only():
+    five = {"a1", "a2", "a3", "a4", "a5"}
+    rows = []
+    # Map 1: all five current starters.
+    for p in ["a1", "a2", "a3", "a4", "a5"]:
+        rows.append(_pmap("m1", "Ascent", p))
+    # Map 2: a stand-in replaced a5, so this map is not "by the current five".
+    for p in ["a1", "a2", "a3", "a4", "sub"]:
+        rows.append(_pmap("m2", "Bind", p))
+    out = lineup_continuity(rows, five)
+    assert out["maps_total"] == 2 and out["maps_current"] == 1
+    assert out["pct"] == 0.5
+
+
+def test_lineup_continuity_none_without_a_current_five():
+    assert lineup_continuity([_pmap("m1", "Ascent", "a1")], set()) is None
+
+
+# --- player consistency / dispersion (v2 batch 2, item 3) -------------------
+
+def _spread_row(player, rating, map_name):
+    return {"team_name": "A", "player_name": player, "player_id": 1,
+            "map_name": map_name, "agent": "Jett", "rating": rating, "acs": 200,
+            "kills": 15, "deaths": 12, "assists": 4, "kast": "70%", "adr": 140,
+            "hs_pct": "20%", "first_kills": 2, "first_deaths": 2,
+            "map_rounds": 24}
+
+
+def test_player_aggregates_reports_rating_spread():
+    # Two maps at 1.00 and 1.40 -> mean 1.20, range 1.00-1.40.
+    rows = [_spread_row("ace", 1.0, "Ascent"), _spread_row("ace", 1.4, "Bind")]
+    p = player_aggregates(rows, "A")[0]
+    sp = p["rating_spread"]
+    assert sp["min"] == 1.0 and sp["max"] == 1.4 and sp["n"] == 2
+    assert sp["std"] > 0
+    # One map gives no dispersion.
+    one = player_aggregates([rows[0]], "A")[0]["rating_spread"]
+    assert one["std"] is None and one["min"] == 1.0
+
+
+# --- league reference points: percentile and field summary (batch 3, item 1)
+
+def test_percentile_midpoint_convention():
+    pop = [10, 20, 30, 40]
+    assert percentile(30, pop) == 100.0 * (2 + 0.5) / 4   # 2 below, 1 equal
+    assert percentile(5, pop) == 0.0
+    assert percentile(50, pop) == 100.0
+    assert percentile(None, pop) is None
+    assert percentile(20, []) is None
+
+
+def test_field_summary_basic_and_empty():
+    s = field_summary([10, None, 30, 20])
+    assert s["n"] == 3 and s["min"] == 10 and s["max"] == 30
+    assert s["median"] == 20 and s["mean"] == 20
+    empty = field_summary([None, None])
+    assert empty == {"n": 0, "min": None, "max": None, "median": None,
+                     "mean": None}
+
+
+# --- opponent-tier split (v2 batch 1, item 5) -------------------------------
+
+def test_tier_of_rank_buckets():
+    assert tier_of_rank(1) == "top10"
+    assert tier_of_rank(10) == "top10"
+    assert tier_of_rank(11) == "mid"
+    assert tier_of_rank(30) == "mid"
+    assert tier_of_rank(31) == "rest"
+    assert tier_of_rank(None) == "rest"   # unranked falls into rest
+
+
+def test_partition_by_tier_splits_rows():
+    rows = [
+        {"opp_rank": 3, "x": 1}, {"opp_rank": 20, "x": 2},
+        {"opp_rank": 50, "x": 3}, {"opp_rank": None, "x": 4},
+    ]
+    buckets = partition_by_tier(rows)
+    assert {r["x"] for r in buckets["top10"]} == {1}
+    assert {r["x"] for r in buckets["mid"]} == {2}
+    assert {r["x"] for r in buckets["rest"]} == {3, 4}   # unranked joins rest

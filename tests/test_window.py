@@ -5,7 +5,13 @@ mirror it so Python-side use and the SQL filter agree on the edges.
 """
 from datetime import date
 
-from valtrack.window import DateWindow, EventFilter, is_lan_event
+from valtrack.window import (
+    DateWindow,
+    EventFilter,
+    StageFilter,
+    classify_stage,
+    is_lan_event,
+)
 
 
 def test_all_time_clause_is_always_true():
@@ -83,3 +89,48 @@ def test_event_filter_lan_and_online_exclude_unknown_events():
     # match with no stored event name lands in neither bucket (only "all").
     assert "NOT (" in on_sql
     assert "IS NOT NULL" in on_sql and "IS NOT NULL" not in lan_sql
+
+
+# --- event-stage classification and filter ----------------------------------
+
+def test_classify_stage_playoff_labels():
+    # Clean abbreviations, full words, and an event name glued onto the round.
+    for label in ["GF", "UBSF", "UBQF", "LR1", "LBF", "Ro16", "QF", "SF",
+                  "Grand Final", "Lower Bracket Final", "Decider (A)",
+                  "Elim (B)", "VCT NA S1: MastersGF", "Round of 32", "UBF (B)"]:
+        assert classify_stage(label) == "playoff", label
+
+
+def test_classify_stage_group_labels():
+    for label in ["Group A", "Group Stage", "Swiss R3", "Week 1", "W3",
+                  "Opening (A)", "Winner's (B)", "Regular Season", "Round Robin"]:
+        assert classify_stage(label) == "group", label
+
+
+def test_classify_stage_unsure_is_unclassified():
+    # Genuinely ambiguous tokens are left out rather than guessed into a bucket.
+    for label in ["R1", "Day 1", "D2", "Showmatch", "Main Event", "Play-ins",
+                  None, "", "Tiebreaker"]:
+        assert classify_stage(label) is None, label
+
+
+def test_classify_stage_playoff_beats_group_when_both_present():
+    # A group's bracket final has both markers; the more specific playoff wins.
+    assert classify_stage("Group A GF") == "playoff"
+
+
+def test_classify_stage_uses_event_name_as_backup():
+    assert classify_stage(None, "Valorant Champions 2024 Playoffs") == "playoff"
+    assert classify_stage(None, "VCT EMEA Stage 1 Group Stage") == "group"
+
+
+def test_stage_filter_all_is_noop():
+    sql, params = StageFilter("all").clause()
+    assert sql == "1=1" and params == []
+
+
+def test_stage_filter_group_and_playoff_are_equality():
+    g_sql, g_params = StageFilter("group").clause("match_stage")
+    p_sql, p_params = StageFilter("playoff").clause("m.match_stage")
+    assert g_sql == "match_stage = ?" and g_params == ["group"]
+    assert p_sql == "m.match_stage = ?" and p_params == ["playoff"]

@@ -363,6 +363,26 @@ def _weighted_mean(pairs):
     return num / den if den else None
 
 
+def _spread(values):
+    """Min, max, and population standard deviation of a list of numbers.
+
+    Skips None entries, so a blank map drops out rather than counting as zero.
+    The standard deviation is the population form (divided by n, not n-1), which
+    is the right summary of the maps a player actually played rather than a sample
+    estimate of a larger unobserved set. Returns all-None when fewer than two real
+    values remain, since dispersion over zero or one map says nothing. This is the
+    spread of one stat across maps, never a composite of several stats.
+    """
+    nums = [v for v in values if v is not None]
+    if len(nums) < 2:
+        lone = nums[0] if nums else None
+        return {"min": lone, "max": lone, "std": None, "n": len(nums)}
+    mean = sum(nums) / len(nums)
+    var = sum((v - mean) ** 2 for v in nums) / len(nums)
+    return {"min": min(nums), "max": max(nums), "std": math.sqrt(var),
+            "n": len(nums)}
+
+
 def _agent_block(agg):
     """Shape one agent's accumulated counts into a display dict."""
     return {
@@ -464,6 +484,13 @@ def player_aggregates(rows, team_name):
             "adr": _weighted_mean(acc["adr"]),
             "kast": _weighted_mean(acc["kast"]),
             "hs_pct": _weighted_mean(acc["hs"]),
+            # Per-map spread alongside the central tendency, so a steady player and
+            # a feast-or-famine one are distinguishable (a 1.10 average that sits
+            # 1.00-1.20 every map reads differently from one that swings 0.70-1.60).
+            # This is the dispersion of one stat, not a new rating.
+            "rating_spread": _spread([v for v, _ in acc["rating"]]),
+            "acs_spread": _spread([v for v, _ in acc["acs"]]),
+            "adr_spread": _spread([v for v, _ in acc["adr"]]),
             "kd": _rate(acc["kills"], acc["deaths"]),
             "kpr": _rate(acc["kills"], acc["rounds"]),
             "apr": _rate(acc["assists"], acc["rounds"]),
@@ -1001,6 +1028,278 @@ def merge_player_aliases(rows):
             d["player_name"] = display[canonical_player_name(nm)]
         out.append(d)
     return out
+
+
+def post_pistol_conversion(round_rows, team_name):
+    """Win rate of the round right after a pistol, given the pistol was won or lost.
+
+    Each row needs match_id, map_name, round_number, winner_team, and is_pistol.
+    The rounds are grouped per map (by match and map name), and for each pistol
+    round the immediately following round (round 2 after round 1, round 14 after
+    round 13) is looked up by number. Two figures come back:
+
+      - won the pistol, then won the next round: the conversion, does this team
+        snowball the pistol into a 2-0 start,
+      - lost the pistol, then won the next round anyway: the recovery, does it
+        break the opponent's bonus round.
+
+    This is a proxy for economy conversion, not the real thing: without buy types
+    a forced-buy upset looks identical to a clean conversion, so it is labeled the
+    "next round after a pistol", not eco conversion, and the two cases are kept
+    separate rather than folded into one number. Reads the same scoped round set
+    that pistol_winrate does, so no new data is needed.
+
+    Returns {won_pistols, won_then_won, won_conv_rate, lost_pistols, lost_then_won,
+    lost_recover_rate}; a rate is None when that case never came up.
+    """
+    games = {}
+    for row in round_rows:
+        rn = row["round_number"]
+        if rn is None:
+            continue
+        key = (row["match_id"], row["map_name"])
+        games.setdefault(key, {})[rn] = {
+            "winner": row["winner_team"], "pistol": bool(row["is_pistol"]),
+        }
+    won_p = won_then = lost_p = lost_then = 0
+    for rounds in games.values():
+        for rn, info in rounds.items():
+            if not info["pistol"]:
+                continue
+            nxt = rounds.get(rn + 1)
+            if nxt is None:
+                continue
+            won_pistol = info["winner"] == team_name
+            won_next = nxt["winner"] == team_name
+            if won_pistol:
+                won_p += 1
+                won_then += 1 if won_next else 0
+            else:
+                lost_p += 1
+                lost_then += 1 if won_next else 0
+    return {
+        "won_pistols": won_p, "won_then_won": won_then,
+        "won_conv_rate": _rate(won_then, won_p),
+        "lost_pistols": lost_p, "lost_then_won": lost_then,
+        "lost_recover_rate": _rate(lost_then, lost_p),
+    }
+
+
+def margin_profile(map_rows, team_name):
+    """How a team wins and loses maps by margin, not just whether it does.
+
+    Each row needs map_name, team1_name, team2_name, team1_score, team2_score, and
+    winner_name (the per-map score rows). The team's score and the opponent's are
+    read from whichever slot the team is in; a map with a missing or tied score is
+    skipped as undecided. From the decided maps:
+
+      - close maps: decided by two rounds or fewer (a 13-11 or an overtime), with
+        the win-loss record in them,
+      - overtime maps: a map that reached overtime, taken as the losing side
+        finishing on 12 or more (regulation ends at 13, so a 12+ loser means the
+        map went past 12-12), with the record,
+      - average winning margin and average losing margin: how decisively the team
+        tends to win and lose.
+
+    Two teams with the same map win rate can be opposite in character here, one
+    winning 13-5 and losing on the wire, the other grinding everything out. These
+    stay raw distribution splits and are never rolled into a "clutch" or
+    "resilience" rating, which would be the banned composite.
+
+    Returns a dict of those counts, records, and average margins; an average is
+    None when the team has no map of that kind.
+    """
+    maps = close_played = close_won = ot_played = ot_won = 0
+    win_margins, loss_margins = [], []
+    for row in map_rows:
+        if team_name == row["team1_name"]:
+            us, them = row["team1_score"], row["team2_score"]
+        elif team_name == row["team2_name"]:
+            us, them = row["team2_score"], row["team1_score"]
+        else:
+            continue
+        if us is None or them is None or us == them:
+            continue
+        maps += 1
+        margin = us - them
+        won = margin > 0
+        if abs(margin) <= 2:
+            close_played += 1
+            close_won += 1 if won else 0
+        if min(us, them) >= 12:
+            ot_played += 1
+            ot_won += 1 if won else 0
+        if won:
+            win_margins.append(margin)
+        else:
+            loss_margins.append(-margin)
+    return {
+        "maps": maps,
+        "close_played": close_played, "close_won": close_won,
+        "close_lost": close_played - close_won,
+        "close_winrate": _rate(close_won, close_played),
+        "ot_played": ot_played, "ot_won": ot_won,
+        "ot_winrate": _rate(ot_won, ot_played),
+        "avg_win_margin": (sum(win_margins) / len(win_margins)
+                           if win_margins else None),
+        "avg_loss_margin": (sum(loss_margins) / len(loss_margins)
+                            if loss_margins else None),
+    }
+
+
+# The confidence levels the matchup log offers, low to high, used to order the
+# calibration buckets so the readout walks from least to most confident.
+CONFIDENCE_ORDER = ["very low", "low", "medium", "high", "very high"]
+
+
+def calibration(entries):
+    """How well the user's own confidence tracked the outcomes they later recorded.
+
+    Each entry needs confidence (one of CONFIDENCE_ORDER), predicted_side ("a" or
+    "b", the team the user leaned toward), and outcome_side ("a" or "b", who
+    actually won). Only entries with both a prediction and a recorded outcome
+    count, since calibration is prediction against result. Entries are grouped by
+    confidence level: for each level, how many resolved and how many the user
+    called correctly, with the hit rate.
+
+    This scores the user's judgment, never a team, so it stays inside the charter:
+    it tells the user how good their reads have been at each confidence level and
+    never declares a matchup winner. Calibration is noisy over a handful of
+    entries, so the caller should lean on the per-bucket counts and not read much
+    into a rate over very few resolved calls.
+
+    Returns {buckets: [{confidence, resolved, correct, rate}], resolved, correct,
+    rate}, with buckets in CONFIDENCE_ORDER and only those that have a resolved
+    entry included.
+    """
+    by_conf = {}
+    total_resolved = total_correct = 0
+    for e in entries:
+        pred = e["predicted_side"] if "predicted_side" in e.keys() else None
+        outcome = e["outcome_side"]
+        if pred not in ("a", "b") or outcome not in ("a", "b"):
+            continue
+        conf = e["confidence"] or "medium"
+        agg = by_conf.setdefault(conf, {"resolved": 0, "correct": 0})
+        agg["resolved"] += 1
+        agg["correct"] += 1 if pred == outcome else 0
+        total_resolved += 1
+        total_correct += 1 if pred == outcome else 0
+    order = CONFIDENCE_ORDER + [c for c in by_conf if c not in CONFIDENCE_ORDER]
+    buckets = [
+        {"confidence": c, "resolved": by_conf[c]["resolved"],
+         "correct": by_conf[c]["correct"],
+         "rate": _rate(by_conf[c]["correct"], by_conf[c]["resolved"])}
+        for c in order if c in by_conf
+    ]
+    return {
+        "buckets": buckets, "resolved": total_resolved,
+        "correct": total_correct, "rate": _rate(total_correct, total_resolved),
+    }
+
+
+def lineup_continuity(rows, five_names):
+    """How many of a team's windowed maps the current five actually played.
+
+    Each row is one player on one map and needs match_id, map_name, team_name, and
+    player_name (the same per-map player rows the aggregates read). `five_names` is
+    the casefolded current-five set. A map counts toward continuity when every
+    player the team fielded on it is one of the current five (no stand-in or former
+    player on the server), which is the concrete version of "how much of this
+    aggregate belongs to the roster that will actually play".
+
+    Team-level figures (side win rates, pistol, map win rate) cannot be reassigned
+    to a roster the way the player figures can, so this quantifies how far to trust
+    those aggregates as a read on the current lineup. Returns None when there is no
+    current five to compare against (so the caller shows nothing rather than 0 of
+    0), otherwise {maps_total, maps_current, pct}.
+    """
+    if not five_names:
+        return None
+    fielded = {}
+    for row in rows:
+        key = (row["match_id"], row["map_name"])
+        name = (row["player_name"] or "").casefold()
+        if name:
+            fielded.setdefault(key, set()).add(name)
+    maps_total = len(fielded)
+    maps_current = sum(1 for names in fielded.values() if names <= five_names)
+    return {"maps_total": maps_total, "maps_current": maps_current,
+            "pct": _rate(maps_current, maps_total)}
+
+
+def percentile(value, population):
+    """Where a value sits among a population, as a 0..100 percentile rank.
+
+    `population` is the field of comparable values (other teams' figures); None
+    entries are dropped. Uses the midpoint convention (values strictly below, plus
+    half of those equal), so a value in the middle of a symmetric field reads near
+    50 rather than being biased up or down. Returns None when the value is missing
+    or the field is empty, which is honest rather than a fabricated rank.
+
+    This positions one statistic at a time, the same way the per-row A-versus-B
+    gap does. It is never rolled up across statistics into an overall standing,
+    which would be the ranking the charter forbids.
+    """
+    if value is None:
+        return None
+    nums = [v for v in population if v is not None]
+    if not nums:
+        return None
+    below = sum(1 for v in nums if v < value)
+    equal = sum(1 for v in nums if v == value)
+    return 100.0 * (below + 0.5 * equal) / len(nums)
+
+
+def field_summary(values):
+    """Min, max, median, and mean of a field of values, skipping None.
+
+    The baseline a single number is read against: a 52% pistol rate means little
+    until you know the field sits near 50. Returns all-None counts when nothing is
+    present. Descriptive only, never a ranking.
+    """
+    nums = sorted(v for v in values if v is not None)
+    if not nums:
+        return {"n": 0, "min": None, "max": None, "median": None, "mean": None}
+    n = len(nums)
+    mid = n // 2
+    median = nums[mid] if n % 2 else (nums[mid - 1] + nums[mid]) / 2
+    return {"n": n, "min": nums[0], "max": nums[-1], "median": median,
+            "mean": sum(nums) / n}
+
+
+# Opponent-strength tiers for the stat-by-tier split. Coarse on purpose: a finer
+# split would spread an already thin cross-region sample too far. An opponent with
+# no stored rank falls into "rest", since only ranked teams (mostly other
+# franchises) carry a rank and the rest are weaker or unranked opposition.
+TIER_ORDER = ["top10", "mid", "rest"]
+TIER_LABELS = {"top10": "vs top 10", "mid": "vs 11-30", "rest": "vs 31+ / unranked"}
+
+
+def tier_of_rank(rank):
+    """Bucket an opponent regional rank into a strength tier (see TIER_ORDER)."""
+    if rank is None:
+        return "rest"
+    if rank <= 10:
+        return "top10"
+    if rank <= 30:
+        return "mid"
+    return "rest"
+
+
+def partition_by_tier(rows):
+    """Split rows carrying an opp_rank into the opponent-strength tier buckets.
+
+    Returns a dict keyed by tier (see TIER_ORDER) of the row subsets, so the
+    caller can run the same aggregation (pistol, side, map win rate) over each and
+    show them side by side. A row with no opp_rank falls into "rest" via
+    tier_of_rank. This re-presents reachable data by opponent strength; it adds no
+    new figure and makes no winner call.
+    """
+    buckets = {}
+    for row in rows:
+        buckets.setdefault(tier_of_rank(row["opp_rank"]), []).append(row)
+    return buckets
 
 
 def align_rosters(team_a_players, team_b_players):
