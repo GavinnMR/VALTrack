@@ -13,20 +13,54 @@ context that says when a number is thin or stale so the data does not mislead.
 
 ## What it shows
 
+Two views of the same matchup, switchable at the top of the comparison:
+
+- **Side by side**: each team in its own column, with a selectable set of
+  sections so you can focus on maps, players, or veto without scrolling past the
+  rest.
+- **Aligned**: one shared table per statistic, with each team's value and the gap
+  between them, and maps in a single shared order so the rows line up.
+
+Either way, an at-a-glance strip up top collects the headline numbers (win rate,
+pistol rate, opening-duel rate, team rating) with the gap, and a per-team summary
+states how many matches and what date span back the figures, plus how many of
+them carry per-match detail.
+
+The detailed sections cover:
+
 - Team identity and roster, current and regional ranking, overall record, recent
-  matches, current form and streak (with a form sparkline), and earnings.
+  matches (results colored win or loss), current form and streak (with a
+  sparkline), and earnings.
 - Per-map win rates with attack and defense side splits, pistol-round win rate,
   and opening-duel win rates at team and player level.
 - Aggregated per-player statistics (rating, ACS, K/D, KAST, ADR, per-round
-  figures, headshot percentage) with agent pools and per-agent performance.
+  figures, headshot percentage) with agent pools and per-agent performance, plus
+  the same player lines split out by map.
+- Series pressure as separate figures: win rate on deciding maps, series win rate
+  when a match reaches a decider, and comebacks after losing the opening map.
+- Recent form (a rolling recent window) beside the selected window with the gap,
+  so a team trending up or down reads as a number.
 - A player-versus-player view that aligns the two rosters by inferred role.
 - Veto and map-pool reconstruction: the likely picks, probable decider, and
-  likely bans for the matchup, with each team's win rate on those maps.
-- Data-honesty aids: sample sizes with small-sample flags, a roster timeline
-  with a current-five filter, a LAN versus online toggle, a stale-data flag, and
-  a rough patch-era banner.
+  likely bans for the matchup, with each team's win rate on those maps, plus a
+  map-pool overlap lens that marks where the two teams' strong maps collide or
+  diverge.
+- A contextualized head-to-head, each past meeting annotated with its date, LAN
+  versus online, the maps and scores, the lineup each side fielded, and how much
+  of that lineup is on the current five.
 - Reasoning aids: common opponents, a free-text notes field per matchup, and a
-  personal matchup log you can resolve and review later.
+  personal matchup log you can edit, delete, resolve with a structured winner,
+  and review later.
+
+All tables sort numerically by column and show data bars where they help, the
+stat abbreviations carry tooltips (with a glossary), and the data-honesty aids
+stay throughout: sample sizes with small-sample flags, a detail-coverage
+indicator, a roster timeline with a current-five filter, a LAN versus online
+toggle, a stale-data flag, and a rough patch-era banner.
+
+The two picks, the date range (all time, quick presets, or a custom window), and
+the toggles are kept in the URL, so a comparison survives a refresh and can be
+bookmarked, and a one-click swap flips which team sits on the left.
 
 ## How it works
 
@@ -144,5 +178,7 @@ Run the tests with the VALTrack environment:
 ```
 
 The aggregation logic (side splits, pistol and opening-duel rates, player
-aggregates, veto reconstruction) is unit tested, since an error there would
-quietly corrupt the comparison. The UI is verified by hand.
+aggregates and the per-map split, series pressure, map-pool overlap, and veto
+reconstruction) is unit tested, since an error there would quietly corrupt the
+comparison. A hermetic test also boots the app against a small seeded database
+and exercises the views and toggles. The UI itself is verified by hand.
