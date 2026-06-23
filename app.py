@@ -15,7 +15,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from valtrack import db, eras, freshness, ingest, journal, queries, stats, veto
-from valtrack.window import DateWindow, EventFilter
+from valtrack.window import DateWindow, EventFilter, is_lan_event
 
 # A team is flagged stale once this many days pass with no match.
 STALE_DAYS = 42
@@ -63,6 +63,174 @@ def team_label(team):
     return f"{team['name']} ({team['league'].capitalize()})"
 
 
+# --- cached reads -----------------------------------------------------------
+# Every widget interaction reruns the whole script, which without caching reruns
+# all of the SQL against a database headed for tens of MB. These wrappers cache
+# the computed rows keyed by the query arguments. The connection is passed
+# underscore-prefixed so Streamlit skips it when hashing (a live sqlite handle is
+# neither hashable nor a sensible cache key), and a db_key is passed so two
+# databases opened at different paths (as the tests do) never share a cache
+# entry. run_incremental_refresh clears the cache so a refresh shows new data.
+# The Row lists are turned into plain dicts so the cached values are simple and
+# the render code, which reads rows by key, is unaffected.
+
+def _db_key():
+    """A stable key for the active database, read at call time so tests see it."""
+    return str(db.DB_PATH)
+
+
+def _dicts(rows):
+    return [dict(r) for r in rows]
+
+
+@st.cache_data(show_spinner=False)
+def cq_roster(db_key, _conn, team_id):
+    return _dicts(queries.get_roster(_conn, team_id))
+
+
+@st.cache_data(show_spinner=False)
+def cq_record(db_key, _conn, team_id, window, events):
+    return queries.team_record(_conn, team_id, window, events)
+
+
+@st.cache_data(show_spinner=False)
+def cq_results(db_key, _conn, team_id, window, events):
+    return queries.decided_results(_conn, team_id, window, events)
+
+
+@st.cache_data(show_spinner=False)
+def cq_recent(db_key, _conn, team_id, window, events, limit):
+    return queries.recent_matches(_conn, team_id, window, limit=limit, events=events)
+
+
+@st.cache_data(show_spinner=False)
+def cq_sos(db_key, _conn, team_id, window, events):
+    return queries.schedule_strength(_conn, team_id, window, events)
+
+
+@st.cache_data(show_spinner=False)
+def cq_map_results(db_key, _conn, team_id, window):
+    return _dicts(queries.team_map_results(_conn, team_id, window))
+
+
+@st.cache_data(show_spinner=False)
+def cq_rounds(db_key, _conn, team_id, window):
+    return _dicts(queries.team_rounds(_conn, team_id, window))
+
+
+@st.cache_data(show_spinner=False)
+def cq_player_opening(db_key, _conn, team_id, window):
+    return _dicts(queries.team_player_opening(_conn, team_id, window))
+
+
+@st.cache_data(show_spinner=False)
+def cq_player_stats(db_key, _conn, team_id, window):
+    return _dicts(queries.team_player_stats(_conn, team_id, window))
+
+
+@st.cache_data(show_spinner=False)
+def cq_appearances(db_key, _conn, team_id, window):
+    return _dicts(queries.player_appearances(_conn, team_id, window))
+
+
+@st.cache_data(show_spinner=False)
+def cq_vetos(db_key, _conn, team_id, window):
+    return _dicts(queries.team_vetos(_conn, team_id, window))
+
+
+@st.cache_data(show_spinner=False)
+def cq_series(db_key, _conn, team_id, window):
+    return _dicts(queries.team_series_results(_conn, team_id, window))
+
+
+@st.cache_data(show_spinner=False)
+def cq_h2h(db_key, _conn, a_id, b_id, window, events):
+    return queries.head_to_head(_conn, a_id, b_id, window, events)
+
+
+@st.cache_data(show_spinner=False)
+def cq_common(db_key, _conn, a_id, b_id, window, events):
+    return queries.common_opponents(_conn, a_id, b_id, window, events)
+
+
+@st.cache_data(show_spinner=False)
+def cq_coverage(db_key, _conn, team_id, window, events):
+    return queries.detail_coverage(_conn, team_id, window, events)
+
+
+@st.cache_data(show_spinner=False)
+def cq_window_summary(db_key, _conn, team_id, window, events):
+    return queries.team_window_summary(_conn, team_id, window, events)
+
+
+@st.cache_data(show_spinner=False)
+def cq_meeting_maps(db_key, _conn, match_id):
+    return _dicts(queries.meeting_maps(_conn, match_id))
+
+
+@st.cache_data(show_spinner=False)
+def cq_meeting_lineup(db_key, _conn, match_id, team_name):
+    return queries.meeting_lineup(_conn, match_id, team_name)
+
+
+# --- small formatting helpers for the aligned and numeric tables ------------
+
+def pct_num(rate):
+    """A win rate (0..1) as a 0..100 number for a numeric column, or None.
+
+    None renders as a blank cell and, unlike a pre-formatted string, sorts and
+    data-bars numerically, which is the point of the aligned and sortable tables.
+    """
+    return 100 * rate if rate is not None else None
+
+
+def gap_str(a, b, suffix="", decimals=0):
+    """A signed gap (A minus B) as text, or a dash when either side is missing.
+
+    The gap is the charter's "difference between them": a per-statistic delta,
+    never a tally across categories. A blank side has nothing to subtract, so the
+    honest cell is a dash rather than a fabricated zero.
+    """
+    if a is None or b is None:
+        return "-"
+    return f"{a - b:+.{decimals}f}{suffix}"
+
+
+# Column setup for the per-player table: numeric columns so a click sorts by
+# value rather than by the text of a pre-formatted string, the format kept on the
+# column, a data bar on KAST so its magnitude is scannable, and a help tooltip on
+# each abbreviation so a casual read does not need the glossary.
+PLAYER_COLUMN_CONFIG = {
+    "Rating": st.column_config.NumberColumn(
+        "Rating", format="%.2f",
+        help="VLR composite rating, round-weighted across the player's maps"),
+    "ACS": st.column_config.NumberColumn(
+        "ACS", format="%.0f", help="Average combat score per round"),
+    "K/D": st.column_config.NumberColumn(
+        "K/D", format="%.2f", help="Kills divided by deaths"),
+    "KAST": st.column_config.ProgressColumn(
+        "KAST", format="%.0f%%", min_value=0, max_value=100,
+        help="Percent of rounds with a kill, assist, survival, or trade"),
+    "ADR": st.column_config.NumberColumn(
+        "ADR", format="%.0f", help="Average damage per round"),
+    "KPR": st.column_config.NumberColumn(
+        "KPR", format="%.2f", help="Kills per round"),
+    "APR": st.column_config.NumberColumn(
+        "APR", format="%.2f", help="Assists per round"),
+    "HS%": st.column_config.NumberColumn(
+        "HS%", format="%.0f%%",
+        help="Headshot percentage (round-weighted approximation)"),
+    "FKPR": st.column_config.NumberColumn(
+        "FKPR", format="%.2f", help="First kills per round"),
+    "FDPR": st.column_config.NumberColumn(
+        "FDPR", format="%.2f", help="First deaths per round"),
+    "Maps": st.column_config.NumberColumn(
+        "Maps", help="Maps played in range (sample size)"),
+    "Rounds": st.column_config.NumberColumn(
+        "Rounds", help="Rounds played in range (sample size)"),
+}
+
+
 def choose_window(conn):
     """Render the shared date-range control and return a DateWindow.
 
@@ -71,18 +239,28 @@ def choose_window(conn):
     teams, so the comparison stays aligned.
     """
     mn, mx = queries.match_date_bounds(conn)
+    today = dt.date.today()
     mode = st.radio(
         "Date range",
-        ["All time", "Custom range"],
+        ["All time", "Last 3 months", "Last 6 months", "Year to date",
+         "Custom range"],
         horizontal=True,
+        key="dwmode",
         help=(
             "Windowed figures (record, recent matches, form and streak) "
-            "recompute for the chosen range. Ranking, rating, and earnings are "
-            "VLR's current all-time values and do not change with the range."
+            "recompute for the chosen range. The presets are quick spans relative "
+            "to today; pick Custom range for an exact window. Ranking, rating, and "
+            "earnings are VLR's current all-time values and do not change."
         ),
     )
     if mode == "All time" or mn is None:
         return DateWindow.all_time()
+    if mode == "Last 3 months":
+        return DateWindow(today - dt.timedelta(days=90), today)
+    if mode == "Last 6 months":
+        return DateWindow(today - dt.timedelta(days=180), today)
+    if mode == "Year to date":
+        return DateWindow(dt.date(today.year, 1, 1), today)
 
     min_d = dt.date.fromisoformat(mn)
     max_d = dt.date.fromisoformat(mx)
@@ -91,6 +269,7 @@ def choose_window(conn):
         value=(min_d, max_d),
         min_value=min_d,
         max_value=max_d,
+        key="dwrange",
     )
     if isinstance(picked, (tuple, list)) and len(picked) == 2:
         return DateWindow(picked[0], picked[1])
@@ -122,8 +301,16 @@ def render_form_sparkline(results):
     st.plotly_chart(fig, width="stretch")
 
 
+def color_form(results):
+    """Recent results as colored letters, green for a win and red for a loss."""
+    return " ".join(
+        f":green[{r}]" if r == "W" else f":red[{r}]" for r in results
+    )
+
+
 def render_record_and_form(conn, team, window, events):
-    record = queries.team_record(conn, team["id"], window, events)
+    k = _db_key()
+    record = cq_record(k, conn, team["id"], window, events)
     if record["decided"]:
         winpct = f"{100 * record['wins'] / record['decided']:.0f}%"
     else:
@@ -132,7 +319,7 @@ def render_record_and_form(conn, team, window, events):
     flag = flag_if_small(record["decided"], MIN_MATCHES)
     st.caption(f"{record['decided']} decided matches, win rate {winpct}{flag}")
 
-    sos = queries.schedule_strength(conn, team["id"], window, events)
+    sos = cq_sos(k, conn, team["id"], window, events)
     if sos["ranked"]:
         st.caption(
             f"Strength of schedule: average opponent rank about #"
@@ -146,10 +333,10 @@ def render_record_and_form(conn, team, window, events):
             "range have a stored rank, so an average is not shown."
         )
 
-    results = queries.decided_results(conn, team["id"], window, events)
+    results = cq_results(k, conn, team["id"], window, events)
     fs = stats.form_and_streak(results)
     if fs["decided"]:
-        st.write("**Form** (most recent first): " + " ".join(fs["form"]))
+        st.markdown("**Form** (most recent first): " + color_form(fs["form"]))
         st.write(f"**Current streak:** {fs['streak_kind']}{fs['streak_len']}")
         render_form_sparkline(results)
     else:
@@ -184,8 +371,9 @@ def render_map_splits(conn, team, window):
     """
     st.divider()
     st.subheader("Per-map and side win rates")
-    map_rows = queries.team_map_results(conn, team["id"], window)
-    round_rows = queries.team_rounds(conn, team["id"], window)
+    k = _db_key()
+    map_rows = cq_map_results(k, conn, team["id"], window)
+    round_rows = cq_rounds(k, conn, team["id"], window)
     table = stats.per_map_splits(map_rows, round_rows, team["name"])
     if not table:
         st.caption(DETAIL_EMPTY)
@@ -197,13 +385,30 @@ def render_map_splits(conn, team, window):
         rows.append({
             "Map": m["map_name"] + flag,
             "Maps": f"{m['won']}-{m['lost']}",
-            "Map win%": pct(m["map_winrate"]) if decided else "-",
-            "ATK win%": pct(m["atk_winrate"]),
+            "Map win%": pct_num(m["map_winrate"]) if decided else None,
+            "ATK win%": pct_num(m["atk_winrate"]),
             "ATK rounds": m["atk_total"],
-            "DEF win%": pct(m["def_winrate"]),
+            "DEF win%": pct_num(m["def_winrate"]),
             "DEF rounds": m["def_total"],
         })
-    st.dataframe(pd.DataFrame(rows), hide_index=True)
+    st.dataframe(
+        pd.DataFrame(rows),
+        hide_index=True,
+        column_config={
+            "Map win%": st.column_config.ProgressColumn(
+                "Map win%", format="%.0f%%", min_value=0, max_value=100,
+                help="Win rate over decided maps",
+            ),
+            "ATK win%": st.column_config.ProgressColumn(
+                "ATK win%", format="%.0f%%", min_value=0, max_value=100,
+                help="Attack-side round win rate",
+            ),
+            "DEF win%": st.column_config.ProgressColumn(
+                "DEF win%", format="%.0f%%", min_value=0, max_value=100,
+                help="Defense-side round win rate",
+            ),
+        },
+    )
 
     chart = [m for m in table
              if m["atk_winrate"] is not None or m["def_winrate"] is not None]
@@ -249,7 +454,7 @@ def render_pistol(conn, team, window):
     """
     st.divider()
     st.subheader("Pistol rounds")
-    round_rows = queries.team_rounds(conn, team["id"], window)
+    round_rows = cq_rounds(_db_key(), conn, team["id"], window)
     p = stats.pistol_winrate(round_rows, team["name"])
     if p["total"] == 0:
         st.caption(DETAIL_EMPTY)
@@ -284,7 +489,7 @@ def render_opening(conn, team, window, five_names=None):
     st.divider()
     st.subheader("Opening duels")
     rows = stats.keep_players(
-        queries.team_player_opening(conn, team["id"], window), five_names
+        cq_player_opening(_db_key(), conn, team["id"], window), five_names
     )
     o = stats.opening_duels(rows, team["name"])
     if o["duels"] == 0:
@@ -310,11 +515,22 @@ def render_opening(conn, team, window, five_names=None):
             "FK": p["fk"],
             "FD": p["fd"],
             "Duels": p["duels"],
-            "Win%": pct(p["winrate"]),
-            "ATK%": pct(p["atk_winrate"]),
-            "DEF%": pct(p["def_winrate"]),
+            "Win%": pct_num(p["winrate"]),
+            "ATK%": pct_num(p["atk_winrate"]),
+            "DEF%": pct_num(p["def_winrate"]),
         })
-    st.dataframe(pd.DataFrame(player_rows), hide_index=True)
+    st.dataframe(
+        pd.DataFrame(player_rows),
+        hide_index=True,
+        column_config={
+            "Win%": st.column_config.NumberColumn(
+                "Win%", format="%.0f%%", help="First kills over opening duels"),
+            "ATK%": st.column_config.NumberColumn("ATK%", format="%.0f%%"),
+            "DEF%": st.column_config.NumberColumn("DEF%", format="%.0f%%"),
+            "FK": st.column_config.NumberColumn(help="First kills"),
+            "FD": st.column_config.NumberColumn(help="First deaths"),
+        },
+    )
     team_small = flag_if_small(o["duels"], MIN_DUELS)
     st.caption(
         f"Opening-duel win rate is first kills over opening duels (first kills "
@@ -355,7 +571,7 @@ def render_player_stats(conn, team, window, five_names=None):
     st.divider()
     st.subheader("Player statistics")
     rows = stats.keep_players(
-        queries.team_player_stats(conn, team["id"], window), five_names
+        cq_player_stats(_db_key(), conn, team["id"], window), five_names
     )
     players = stats.player_aggregates(rows, team["name"])
     if not players:
@@ -365,20 +581,22 @@ def render_player_stats(conn, team, window, five_names=None):
     for p in players:
         table.append({
             "Player": p["player_name"] + flag_if_small(p["maps"], MIN_PLAYER_MAPS),
-            "Rating": num2(p["rating"]),
-            "ACS": num1(p["acs"]),
-            "K/D": num2(p["kd"]),
-            "KAST": pct100(p["kast"]),
-            "ADR": num1(p["adr"]),
-            "KPR": num2(p["kpr"]),
-            "APR": num2(p["apr"]),
-            "HS%": pct100(p["hs_pct"]),
-            "FKPR": num2(p["fk_per_round"]),
-            "FDPR": num2(p["fd_per_round"]),
+            "Rating": p["rating"],
+            "ACS": p["acs"],
+            "K/D": p["kd"],
+            "KAST": p["kast"],
+            "ADR": p["adr"],
+            "KPR": p["kpr"],
+            "APR": p["apr"],
+            "HS%": p["hs_pct"],
+            "FKPR": p["fk_per_round"],
+            "FDPR": p["fd_per_round"],
             "Maps": p["maps"],
             "Rounds": p["rounds"],
         })
-    st.dataframe(pd.DataFrame(table), hide_index=True)
+    st.dataframe(
+        pd.DataFrame(table), hide_index=True, column_config=PLAYER_COLUMN_CONFIG
+    )
     with st.expander("Agent pool and per-agent performance"):
         for p in players:
             if not p["agents"]:
@@ -389,11 +607,19 @@ def render_player_stats(conn, team, window, five_names=None):
                 agent_rows.append({
                     "Agent": a["agent"],
                     "Maps": a["maps"],
-                    "Rating": num2(a["rating"]),
-                    "ACS": num1(a["acs"]),
-                    "K/D": num2(a["kd"]),
+                    "Rating": a["rating"],
+                    "ACS": a["acs"],
+                    "K/D": a["kd"],
                 })
-            st.dataframe(pd.DataFrame(agent_rows), hide_index=True)
+            st.dataframe(
+                pd.DataFrame(agent_rows),
+                hide_index=True,
+                column_config={
+                    "Rating": st.column_config.NumberColumn(format="%.2f"),
+                    "ACS": st.column_config.NumberColumn(format="%.0f"),
+                    "K/D": st.column_config.NumberColumn(format="%.2f"),
+                },
+            )
     st.caption(
         "Rating, ACS, ADR, KAST, and HS% are round-weighted averages across the "
         "player's maps; K/D, KPR, APR, and the first-kill and first-death per-round "
@@ -426,9 +652,10 @@ def _pvp_side(player):
 
 def _team_map_splits(conn, team, window):
     """Per-map splits for a team keyed by map name, for the win-rate payoff."""
+    k = _db_key()
     table = stats.per_map_splits(
-        queries.team_map_results(conn, team["id"], window),
-        queries.team_rounds(conn, team["id"], window),
+        cq_map_results(k, conn, team["id"], window),
+        cq_rounds(k, conn, team["id"], window),
         team["name"],
     )
     return {m["map_name"]: m for m in table}
@@ -444,11 +671,12 @@ def render_veto_reconstruction(conn, team_a, team_b, window):
     a real upcoming veto, and it makes no claim about who wins the match.
     """
     st.header("Veto and map-pool reconstruction")
+    k = _db_key()
     a_tend = veto.team_tendencies(
-        queries.team_vetos(conn, team_a["id"], window), team_a["tag"]
+        cq_vetos(k, conn, team_a["id"], window), team_a["tag"]
     )
     b_tend = veto.team_tendencies(
-        queries.team_vetos(conn, team_b["id"], window), team_b["tag"]
+        cq_vetos(k, conn, team_b["id"], window), team_b["tag"]
     )
     pool = veto.active_pool(a_tend, b_tend)
     if not pool:
@@ -556,6 +784,9 @@ def render_veto_reconstruction(conn, team_a, team_b, window):
         f"than {MIN_VETO_APPEAR} of the two teams' vetos combined."
     )
 
+    st.divider()
+    render_overlap(conn, team_a, team_b, window, pool)
+
 
 def render_player_vs_player(conn, team_a, team_b, window, five_only):
     """Align the two rosters by inferred role and compare player against player.
@@ -569,17 +800,18 @@ def render_player_vs_player(conn, team_a, team_b, window, five_only):
     """
     st.divider()
     st.header("Player versus player")
+    k = _db_key()
     a_names = current_five_set(conn, team_a) if five_only else None
     b_names = current_five_set(conn, team_b) if five_only else None
     a_players = stats.player_aggregates(
         stats.keep_players(
-            queries.team_player_stats(conn, team_a["id"], window), a_names
+            cq_player_stats(k, conn, team_a["id"], window), a_names
         ),
         team_a["name"],
     )
     b_players = stats.player_aggregates(
         stats.keep_players(
-            queries.team_player_stats(conn, team_b["id"], window), b_names
+            cq_player_stats(k, conn, team_b["id"], window), b_names
         ),
         team_b["name"],
     )
@@ -622,11 +854,34 @@ def render_player_vs_player(conn, team_a, team_b, window, five_only):
     )
 
 
+def _lineup_overlap(lineup, five_names):
+    """How many of a fielded lineup are on the current five, as 'k of 5'.
+
+    Reading the lineup from who actually played sidesteps the empty roster-change
+    table and is the concrete version of the roster-and-patch discounting the
+    charter asks for: it shows how much of a past result the current roster
+    actually owns. Returns None when no lineup is stored for that meeting.
+    """
+    if not lineup:
+        return None
+    on_five = sum(1 for name in lineup if (name or "").casefold() in five_names)
+    return f"{on_five} of {len(five_names)} current starters played"
+
+
 def render_head_to_head(conn, team_a, team_b, window, events):
-    """The two teams' direct record against each other, when they have met."""
+    """The two teams' direct record, with each meeting annotated for context.
+
+    Raw head-to-head can mislead: a 2-0 record from two years ago under different
+    rosters is not the same as a recent one. So each meeting is annotated with when
+    it happened, LAN versus online, the maps and per-map scores, the lineup each
+    side actually fielded, and how much of that lineup is on the current five. An
+    older meeting the detail harvest has not reached honestly shows only its series
+    score until detail fills.
+    """
     st.divider()
     st.header("Head-to-head")
-    h2h = queries.head_to_head(conn, team_a["id"], team_b["id"], window, events)
+    k = _db_key()
+    h2h = cq_h2h(k, conn, team_a["id"], team_b["id"], window, events)
     if not h2h["decided"]:
         st.caption(
             "These two teams have not played a decided match in this range and "
@@ -639,19 +894,58 @@ def render_head_to_head(conn, team_a, team_b, window, events):
     right.metric(f"{team_b['name']} wins", h2h["b_wins"])
     flag = flag_if_small(h2h["decided"], MIN_MATCHES)
     st.caption(f"{h2h['decided']} meetings{flag}")
-    rows = []
+
+    five_a = current_five_set(conn, team_a)
+    five_b = current_five_set(conn, team_b)
     for m in h2h["meetings"]:
         winner = team_a["name"] if m["winner"] == "a" else team_b["name"]
-        rows.append({
-            "Date": m["date"],
-            "Event": m["event"] or "",
-            "Score (A-B)": f"{m['a_score']}-{m['b_score']}",
-            "Winner": winner,
-        })
-    st.dataframe(pd.DataFrame(rows), hide_index=True)
+        env = "LAN" if is_lan_event(m["event"]) else "online/unknown"
+        header = (
+            f"{m['date']}  |  {m['a_score']}-{m['b_score']}  |  {winner} won  "
+            f"|  {env}"
+        )
+        with st.expander(header):
+            if m["event"]:
+                st.caption(m["event"])
+            maps = cq_meeting_maps(k, conn, m["match_id"])
+            if maps:
+                map_rows = []
+                for mp in maps:
+                    if not mp["map_name"]:
+                        continue
+                    map_rows.append({
+                        "Map": mp["map_name"],
+                        "Score": f"{mp['team1_score']}-{mp['team2_score']}",
+                        "Winner": mp["winner_name"] or "",
+                    })
+                if map_rows:
+                    st.dataframe(pd.DataFrame(map_rows), hide_index=True)
+            else:
+                st.caption(
+                    "No per-map detail stored for this meeting yet, so only the "
+                    "series score is known. It fills in as the detail harvest runs."
+                )
+            lineup_a = cq_meeting_lineup(k, conn, m["match_id"], team_a["name"])
+            lineup_b = cq_meeting_lineup(k, conn, m["match_id"], team_b["name"])
+            if lineup_a or lineup_b:
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.caption(f"{team_a['name']} fielded")
+                    st.write(", ".join(lineup_a) if lineup_a else "not stored")
+                    ov = _lineup_overlap(lineup_a, five_a)
+                    if ov:
+                        st.caption(ov)
+                with c2:
+                    st.caption(f"{team_b['name']} fielded")
+                    st.write(", ".join(lineup_b) if lineup_b else "not stored")
+                    ov = _lineup_overlap(lineup_b, five_b)
+                    if ov:
+                        st.caption(ov)
     st.caption(
-        "Direct meetings between the two teams, newest first, scores from "
-        f"{team_a['name']}'s point of view."
+        "Meetings newest first, scores from "
+        f"{team_a['name']}'s point of view. LAN versus online is inferred from the "
+        "event name. Lineups are who actually played that day, and the current-five "
+        "overlap shows how much of the result the current roster owns."
     )
 
 
@@ -659,8 +953,8 @@ def render_common_opponents(conn, team_a, team_b, window, events):
     """Opponents both teams have faced, with each team's record against them."""
     st.divider()
     st.header("Common opponents")
-    common = queries.common_opponents(
-        conn, team_a["id"], team_b["id"], window, events
+    common = cq_common(
+        _db_key(), conn, team_a["id"], team_b["id"], window, events
     )
     if not common:
         st.caption(
@@ -668,18 +962,27 @@ def render_common_opponents(conn, team_a, team_b, window, events):
             "This is common for teams in different regions over a short window."
         )
         return
+    a_tag = team_a["tag"] or "A"
+    b_tag = team_b["tag"] or "B"
     rows = []
     for c in common:
         a, b = c["a"], c["b"]
         a_decided, b_decided = a["wins"] + a["losses"], b["wins"] + b["losses"]
         rows.append({
             "Opponent": c["opponent"],
-            f"{team_a['tag'] or 'A'} record": f"{a['wins']}-{a['losses']}",
-            f"{team_a['tag'] or 'A'} win%": pct(a["wins"] / a_decided) if a_decided else "-",
-            f"{team_b['tag'] or 'B'} record": f"{b['wins']}-{b['losses']}",
-            f"{team_b['tag'] or 'B'} win%": pct(b["wins"] / b_decided) if b_decided else "-",
+            f"{a_tag} record": f"{a['wins']}-{a['losses']}",
+            f"{a_tag} win%": pct_num(a["wins"] / a_decided) if a_decided else None,
+            f"{b_tag} record": f"{b['wins']}-{b['losses']}",
+            f"{b_tag} win%": pct_num(b["wins"] / b_decided) if b_decided else None,
         })
-    st.dataframe(pd.DataFrame(rows), hide_index=True)
+    st.dataframe(
+        pd.DataFrame(rows),
+        hide_index=True,
+        column_config={
+            f"{a_tag} win%": st.column_config.NumberColumn(format="%.0f%%"),
+            f"{b_tag} win%": st.column_config.NumberColumn(format="%.0f%%"),
+        },
+    )
     st.caption(
         "Decided results against opponents both teams have played in the selected "
         "range and event type. Most useful across regions, where the two rarely "
@@ -728,6 +1031,7 @@ def render_matchup_log(conn, team_a, team_b):
     if not entries:
         st.caption("No log entries yet. Add one above to start tracking your calls.")
         return
+    confidence_options = ["very low", "low", "medium", "high", "very high"]
     st.subheader(f"Past entries ({len(entries)})")
     for e in entries:
         with st.container(border=True):
@@ -738,25 +1042,52 @@ def render_matchup_log(conn, team_a, team_b):
             )
             if e["note"]:
                 st.write(e["note"])
-            if e["outcome"]:
+            if e["outcome"] or e["outcome_side"]:
                 resolved = (e["resolved_at"] or "")[:10]
-                st.caption(f"Outcome: {e['outcome']} (recorded {resolved})")
+                winner = ""
+                if e["outcome_side"] == "a":
+                    winner = f"{e['team_a_name']} won. "
+                elif e["outcome_side"] == "b":
+                    winner = f"{e['team_b_name']} won. "
+                st.caption(f"Outcome: {winner}{e['outcome'] or ''} (recorded {resolved})")
             else:
-                outcome = st.text_input(
-                    "Record the actual outcome", key=f"log_outcome_{e['id']}"
+                winner = st.radio(
+                    "Who won?",
+                    ["a", "b"],
+                    format_func=lambda s, e=e: (
+                        e["team_a_name"] if s == "a" else e["team_b_name"]),
+                    horizontal=True,
+                    key=f"log_side_{e['id']}",
+                )
+                detail = st.text_input(
+                    "Detail (optional, e.g. the score)", key=f"log_outcome_{e['id']}"
                 )
                 if st.button("Save outcome", key=f"log_resolve_{e['id']}"):
-                    if outcome.strip():
-                        journal.resolve_log_entry(conn, e["id"], outcome.strip())
-                        st.rerun()
-                    else:
-                        st.warning("Enter an outcome before saving.")
+                    journal.resolve_log_entry(
+                        conn, e["id"], detail.strip(), outcome_side=winner)
+                    st.rerun()
+
+            with st.expander("Edit or delete"):
+                new_note = st.text_area(
+                    "Note", value=e["note"] or "", key=f"log_editnote_{e['id']}")
+                idx = (confidence_options.index(e["confidence"])
+                       if e["confidence"] in confidence_options else 2)
+                new_conf = st.select_slider(
+                    "Confidence", options=confidence_options, value=confidence_options[idx],
+                    key=f"log_editconf_{e['id']}")
+                col_save, col_del = st.columns(2)
+                if col_save.button("Save edit", key=f"log_save_{e['id']}"):
+                    journal.update_log_entry(conn, e["id"], new_note, new_conf)
+                    st.rerun()
+                if col_del.button("Delete entry", key=f"log_delete_{e['id']}"):
+                    journal.delete_log_entry(conn, e["id"])
+                    st.rerun()
 
 
 def render_recent(conn, team, window, events):
     st.divider()
     st.subheader("Recent matches")
-    recent = queries.recent_matches(conn, team["id"], window, limit=10, events=events)
+    recent = cq_recent(_db_key(), conn, team["id"], window, events, 10)
     if not recent:
         st.caption("No matches in this range.")
         return
@@ -771,13 +1102,19 @@ def render_recent(conn, team, window, events):
             "Score": score,
             "Result": m["result"] or "",
         })
-    st.dataframe(pd.DataFrame(rows), hide_index=True)
+    df = pd.DataFrame(rows)
+    styled = df.style.map(
+        lambda v: "color:#2a9d8f" if v == "W"
+        else ("color:#e76f51" if v == "L" else ""),
+        subset=["Result"],
+    )
+    st.dataframe(styled, hide_index=True)
 
 
 def render_roster(conn, team):
     st.divider()
     st.subheader("Roster")
-    roster = stats.classify_roster(queries.get_roster(conn, team["id"]))
+    roster = stats.classify_roster(cq_roster(_db_key(), conn, team["id"]))
     mains = roster["mains"]
     st.caption(f"Current five ({len(mains)} listed)")
     for p in mains:
@@ -801,7 +1138,7 @@ def render_roster(conn, team):
 
 def current_five_set(conn, team):
     """The casefolded current-five names for a team, for the player filter."""
-    return stats.current_five_names(queries.get_roster(conn, team["id"]))
+    return stats.current_five_names(cq_roster(_db_key(), conn, team["id"]))
 
 
 def render_roster_timeline(conn, team, window):
@@ -814,7 +1151,7 @@ def render_roster_timeline(conn, team, window):
     """
     st.divider()
     st.subheader("Roster timeline")
-    rows = queries.player_appearances(conn, team["id"], window)
+    rows = cq_appearances(_db_key(), conn, team["id"], window)
     if not rows:
         st.caption("No per-map detail stored in this range, so no appearances.")
         return
@@ -852,8 +1189,403 @@ def render_stale_flag(conn, team):
         )
 
 
-def render_team(conn, column, team, window, five_only, events):
-    """Render one team's full comparison column."""
+def team_headline(conn, team, window, events, five_names=None):
+    """The comparable headline figures for one team in a window.
+
+    Win rate, pistol rate, and opening-duel rate come back as 0..100 numbers (or
+    None when there is nothing to judge), the record as text, and a single
+    round-weighted team rating. These are the figures the at-a-glance strip, the
+    aligned core table, and the recent-versus-window block all read, so they are
+    computed in one place. They are shown beside the opponent's with the gap; none
+    of them is a composite or a winner call.
+    """
+    k = _db_key()
+    rec = cq_record(k, conn, team["id"], window, events)
+    win = 100 * rec["wins"] / rec["decided"] if rec["decided"] else None
+    p = stats.pistol_winrate(cq_rounds(k, conn, team["id"], window), team["name"])
+    o = stats.opening_duels(
+        stats.keep_players(
+            cq_player_opening(k, conn, team["id"], window), five_names),
+        team["name"],
+    )
+    players = stats.player_aggregates(
+        stats.keep_players(
+            cq_player_stats(k, conn, team["id"], window), five_names),
+        team["name"],
+    )
+    return {
+        "record": f"{rec['wins']}-{rec['losses']}",
+        "decided": rec["decided"],
+        "win": win,
+        "pistol": pct_num(p["winrate"]),
+        "pistol_n": p["total"],
+        "opening": pct_num(o["winrate"]),
+        "opening_n": o["duels"],
+        "rating": stats.team_rating(players),
+    }
+
+
+def render_comparison_strip(conn, team_a, team_b, window, events, five_only):
+    """A compact aligned row of the headline numbers with the gap (item 2).
+
+    Before the detailed sections, this assembles the figures the user would
+    otherwise have to scroll both columns to collect: win rate, pistol rate,
+    opening-duel rate, and a single team rating, each shown for both teams with the
+    A minus B gap. It is a per-statistic difference, never a tally of who leads.
+    """
+    five_a = current_five_set(conn, team_a) if five_only else None
+    five_b = current_five_set(conn, team_b) if five_only else None
+    a = team_headline(conn, team_a, window, events, five_a)
+    b = team_headline(conn, team_b, window, events, five_b)
+    a_tag = team_a["tag"] or "A"
+    b_tag = team_b["tag"] or "B"
+    rows = [
+        {"Metric": "Win %", a_tag: pct100(a["win"]), b_tag: pct100(b["win"]),
+         "Gap (A-B)": gap_str(a["win"], b["win"], "%")},
+        {"Metric": "Pistol %", a_tag: pct100(a["pistol"]),
+         b_tag: pct100(b["pistol"]),
+         "Gap (A-B)": gap_str(a["pistol"], b["pistol"], "%")},
+        {"Metric": "Opening-duel %", a_tag: pct100(a["opening"]),
+         b_tag: pct100(b["opening"]),
+         "Gap (A-B)": gap_str(a["opening"], b["opening"], "%")},
+        {"Metric": "Team rating", a_tag: num2(a["rating"]),
+         b_tag: num2(b["rating"]),
+         "Gap (A-B)": gap_str(a["rating"], b["rating"], "", 2)},
+    ]
+    st.dataframe(pd.DataFrame(rows), hide_index=True)
+    st.caption(
+        f"{team_a['name']}: {a['record']} ({a['decided']} decided)  |  "
+        f"{team_b['name']}: {b['record']} ({b['decided']} decided). "
+        "Pistol, opening, and rating need per-match detail, so they cover only "
+        "detailed matches. The gap is a per-statistic difference, not a score."
+    )
+
+
+def render_window_summary(conn, team, window, events):
+    """One line on how much data backs this column (items 14 and 19).
+
+    States the decided and total matches and the date span in range up front, then
+    how many of those matches carry per-match detail, so the user knows how
+    complete a detail-derived figure is before reading it.
+    """
+    k = _db_key()
+    s = cq_window_summary(k, conn, team["id"], window, events)
+    cov = cq_coverage(k, conn, team["id"], window, events)
+    if s["total"]:
+        span = ""
+        if s["min_date"] and s["max_date"]:
+            span = f", {s['min_date']} to {s['max_date']} in range"
+        st.caption(
+            f"{s['decided']} decided of {s['total']} matches{span}. Per-map detail "
+            f"available for {cov['detailed']} of {cov['total']} matches in range."
+        )
+    else:
+        st.caption("No matches in this range and event type.")
+
+
+def render_recent_vs_window(conn, team, window, events, five_names=None):
+    """Key stats over the last 90 days beside the selected window (item 8).
+
+    A team trending hard becomes a number rather than a sparkline wiggle: each
+    headline figure is shown for a rolling recent window and for the selected
+    window, with the gap. An all-time-versus-recent difference per stat is a
+    difference, not a composite.
+    """
+    st.divider()
+    st.subheader("Recent form versus the selected window")
+    recent_window = DateWindow(dt.date.today() - dt.timedelta(days=90),
+                               dt.date.today())
+    recent = team_headline(conn, team, recent_window, events, five_names)
+    base = team_headline(conn, team, window, events, five_names)
+    label = "Selected window" if not window.is_all_time else "All time"
+    rows = [
+        {"Metric": "Win %", "Last 90 days": pct100(recent["win"]),
+         label: pct100(base["win"]),
+         "Gap": gap_str(recent["win"], base["win"], "%")},
+        {"Metric": "Pistol %", "Last 90 days": pct100(recent["pistol"]),
+         label: pct100(base["pistol"]),
+         "Gap": gap_str(recent["pistol"], base["pistol"], "%")},
+        {"Metric": "Opening-duel %", "Last 90 days": pct100(recent["opening"]),
+         label: pct100(base["opening"]),
+         "Gap": gap_str(recent["opening"], base["opening"], "%")},
+        {"Metric": "Team rating", "Last 90 days": num2(recent["rating"]),
+         label: num2(base["rating"]),
+         "Gap": gap_str(recent["rating"], base["rating"], "", 2)},
+    ]
+    st.dataframe(pd.DataFrame(rows), hide_index=True)
+    st.caption(
+        "Last 90 days is a rolling window from today, independent of the date "
+        "range above. The gap is recent minus the selected window."
+    )
+
+
+def render_pressure(conn, team, window):
+    """Decider, distance, and comeback figures under series pressure (item 9).
+
+    How a team does when a series is on the line: its win rate on deciding maps,
+    its series win rate when a match reaches a decider, and how often it comes back
+    from dropping the opening map. These are shown as separate figures, never
+    folded into a single clutch or resilience rating, which would be the composite
+    the charter forbids.
+    """
+    st.divider()
+    st.subheader("Series pressure")
+    rows = cq_series(_db_key(), conn, team["id"], window)
+    ps = stats.pressure_stats(rows, team["name"])
+    if ps["decider_played"] == 0 and ps["comeback_chances"] == 0:
+        st.caption(
+            "No multi-map series with a decider or an opening-map loss in this "
+            "range yet. These fill in as the detail harvest runs."
+        )
+        return
+    c1, c2, c3 = st.columns(3)
+    c1.metric(
+        "Decider map win%", pct(ps["decider_winrate"]),
+        help=f"{ps['decider_won']} of {ps['decider_played']} deciding maps",
+    )
+    c2.metric(
+        "Series win% in deciders", pct(ps["distance_winrate"]),
+        help=f"{ps['distance_series_won']} of {ps['distance_played']} series "
+             "that reached a decider",
+    )
+    c3.metric(
+        "Comebacks", f"{ps['comeback_won']} of {ps['comeback_chances']}",
+        help="Series won after losing the opening map, over series where the "
+             "opening map was lost",
+    )
+    flag = flag_if_small(ps["decider_played"], MIN_MATCHES)
+    st.caption(
+        f"Decider is the final map of a series entered level on maps{flag}. The "
+        "decider map result and the series-in-decider result are closely related "
+        "but shown separately, never combined into one rating. Comebacks count "
+        "dropping the opening map and still winning the series."
+    )
+
+
+def _player_table_rows(players):
+    """Shape a player_aggregates list into the per-player table rows."""
+    table = []
+    for p in players:
+        table.append({
+            "Player": p["player_name"] + flag_if_small(p["maps"], MIN_PLAYER_MAPS),
+            "Rating": p["rating"], "ACS": p["acs"], "K/D": p["kd"],
+            "KAST": p["kast"], "ADR": p["adr"], "KPR": p["kpr"], "APR": p["apr"],
+            "HS%": p["hs_pct"], "FKPR": p["fk_per_round"],
+            "FDPR": p["fd_per_round"], "Maps": p["maps"], "Rounds": p["rounds"],
+        })
+    return table
+
+
+def render_player_map_performance(conn, team, window, five_names=None):
+    """Per-player statistics split by map, not just the all-map average (item 7).
+
+    A duelist who pops off on Ascent but goes quiet on Lotus shows two different
+    lines here, which is the sharpest axis in the game. The same round-weighted
+    aggregation is reused per map, so the only new thing is the split. Per-map
+    samples are thin, so the small-sample flag matters more here, not less.
+    """
+    st.divider()
+    st.subheader("Player performance by map")
+    rows = stats.keep_players(
+        cq_player_stats(_db_key(), conn, team["id"], window), five_names
+    )
+    by_map = stats.player_map_aggregates(rows, team["name"])
+    if not by_map:
+        st.caption(DETAIL_EMPTY)
+        return
+    maps = sorted(by_map, key=lambda m: (-len(by_map[m]), m))
+    chosen = st.selectbox(
+        "Map", maps, key=f"pmp_map_{team['id']}",
+        help="Player lines for the chosen map only, not the all-map average.",
+    )
+    st.dataframe(
+        pd.DataFrame(_player_table_rows(by_map[chosen])),
+        hide_index=True,
+        column_config=PLAYER_COLUMN_CONFIG,
+    )
+    st.caption(
+        f"Per-player figures on {chosen} only. Samples per player per map are "
+        f"thin, so {FLAG} (fewer than {MIN_PLAYER_MAPS} maps) shows up more often "
+        "here; read those lines with care."
+    )
+
+
+def render_overlap(conn, team_a, team_b, window, pool):
+    """Where the two teams' per-map strengths collide or diverge (item 11).
+
+    A strategic framing over numbers already computed: each team's per-map win
+    rate, with the map marked shared strength, shared weakness, or split. It stays
+    strictly descriptive and never ranks the maps into a veto verdict, which would
+    be the call the charter forbids.
+    """
+    st.subheader("Map-pool overlap")
+    a_splits = _team_map_splits(conn, team_a, window)
+    b_splits = _team_map_splits(conn, team_b, window)
+    overlap = stats.map_pool_overlap(a_splits, b_splits, pool)
+    a_tag = team_a["tag"] or "A"
+    b_tag = team_b["tag"] or "B"
+    rows = []
+    for row in overlap:
+        rows.append({
+            "Map": row["map"],
+            f"{a_tag} map%": pct_num(row["a_winrate"]),
+            f"{b_tag} map%": pct_num(row["b_winrate"]),
+            "Overlap": row["label"],
+        })
+    st.dataframe(
+        pd.DataFrame(rows),
+        hide_index=True,
+        column_config={
+            f"{a_tag} map%": st.column_config.NumberColumn(format="%.0f%%"),
+            f"{b_tag} map%": st.column_config.NumberColumn(format="%.0f%%"),
+        },
+    )
+    st.caption(
+        "Each team's win rate on the likely-played maps, with the map marked: "
+        "shared strength (both at or above 50%), shared weakness (both below), "
+        "split (one of each), or insufficient (a team has no decided map there). "
+        "This is descriptive only; it does not call who wins the veto."
+    )
+
+
+def render_aligned(conn, team_a, team_b, window, events, five_only):
+    """One shared table per core stat with the gap, instead of two columns.
+
+    This is the charter line the side-by-side layout under-delivers: each row shows
+    A, B, and the gap, with maps in a single shared order so they line up (items 1
+    and 5). It is a per-statistic difference throughout, never a cross-category
+    tally or an overall rating.
+    """
+    five_a = current_five_set(conn, team_a) if five_only else None
+    five_b = current_five_set(conn, team_b) if five_only else None
+    a = team_headline(conn, team_a, window, events, five_a)
+    b = team_headline(conn, team_b, window, events, five_b)
+    a_tag = team_a["tag"] or "A"
+    b_tag = team_b["tag"] or "B"
+
+    st.subheader("Core figures, aligned")
+    core = [
+        {"Metric": "Win %", a_tag: pct100(a["win"]), b_tag: pct100(b["win"]),
+         "Gap (A-B)": gap_str(a["win"], b["win"], "%"),
+         "Sample": f"{a['decided']} vs {b['decided']} decided"},
+        {"Metric": "Pistol %", a_tag: pct100(a["pistol"]),
+         b_tag: pct100(b["pistol"]),
+         "Gap (A-B)": gap_str(a["pistol"], b["pistol"], "%"),
+         "Sample": f"{a['pistol_n']} vs {b['pistol_n']} pistols"},
+        {"Metric": "Opening-duel %", a_tag: pct100(a["opening"]),
+         b_tag: pct100(b["opening"]),
+         "Gap (A-B)": gap_str(a["opening"], b["opening"], "%"),
+         "Sample": f"{a['opening_n']} vs {b['opening_n']} duels"},
+        {"Metric": "Team rating", a_tag: num2(a["rating"]),
+         b_tag: num2(b["rating"]),
+         "Gap (A-B)": gap_str(a["rating"], b["rating"], "", 2),
+         "Sample": "round-weighted"},
+    ]
+    st.dataframe(pd.DataFrame(core), hide_index=True)
+
+    st.subheader("Per-map and side win rates, aligned")
+    a_splits = _team_map_splits(conn, team_a, window)
+    b_splits = _team_map_splits(conn, team_b, window)
+    if not a_splits and not b_splits:
+        st.caption(DETAIL_EMPTY)
+        return
+    names = set(a_splits) | set(b_splits)
+
+    def plays(splits, name):
+        m = splits.get(name)
+        return (m["won"] + m["lost"]) if m else 0
+
+    # A single shared order so the rows line up: most-played across both teams
+    # first, then by name. This is item 5, folded into the aligned table.
+    ordered = sorted(names, key=lambda n: (-(plays(a_splits, n)
+                                            + plays(b_splits, n)), n))
+    rows = []
+    for name in ordered:
+        am = a_splits.get(name)
+        bm = b_splits.get(name)
+        a_win = am["map_winrate"] if am else None
+        b_win = bm["map_winrate"] if bm else None
+        seen = ((am["rounds_total"] if am else 0)
+                + (bm["rounds_total"] if bm else 0))
+        rows.append({
+            "Map": name + flag_if_small(seen, MIN_MAP_ROUNDS),
+            f"{a_tag} map%": pct_num(a_win),
+            f"{b_tag} map%": pct_num(b_win),
+            "Gap (A-B)": gap_str(pct_num(a_win), pct_num(b_win), "%"),
+            f"{a_tag} ATK": pct_num(am["atk_winrate"]) if am else None,
+            f"{b_tag} ATK": pct_num(bm["atk_winrate"]) if bm else None,
+            f"{a_tag} DEF": pct_num(am["def_winrate"]) if am else None,
+            f"{b_tag} DEF": pct_num(bm["def_winrate"]) if bm else None,
+        })
+    def bar(label):
+        return st.column_config.ProgressColumn(
+            label, format="%.0f%%", min_value=0, max_value=100)
+
+    def pctcol(label):
+        return st.column_config.NumberColumn(label, format="%.0f%%")
+
+    st.dataframe(
+        pd.DataFrame(rows),
+        hide_index=True,
+        column_config={
+            f"{a_tag} map%": bar(f"{a_tag} map%"),
+            f"{b_tag} map%": bar(f"{b_tag} map%"),
+            f"{a_tag} ATK": pctcol(f"{a_tag} ATK"),
+            f"{b_tag} ATK": pctcol(f"{b_tag} ATK"),
+            f"{a_tag} DEF": pctcol(f"{a_tag} DEF"),
+            f"{b_tag} DEF": pctcol(f"{b_tag} DEF"),
+        },
+    )
+    st.caption(
+        "Maps in a shared order so the rows line up. Map win% is over decided "
+        f"maps, side rates over rounds on that side. {FLAG} marks a map with fewer "
+        f"than {MIN_MAP_ROUNDS} rounds across both teams. The gap is A minus B in "
+        "points; it is a per-row difference, not a tally."
+    )
+
+
+def render_glossary():
+    """A small glossary of the stat abbreviations (item 15)."""
+    with st.expander("Glossary of stat abbreviations"):
+        st.markdown(
+            "- **ACS**: average combat score per round.\n"
+            "- **KAST**: percent of rounds with a kill, assist, survival, or "
+            "trade.\n"
+            "- **ADR**: average damage per round.\n"
+            "- **K/D**: kills divided by deaths.\n"
+            "- **KPR / APR**: kills and assists per round.\n"
+            "- **HS%**: headshot percentage (round-weighted approximation).\n"
+            "- **FK / FD, FKPR / FDPR**: first kills and first deaths, and those "
+            "per round.\n"
+            "- **ATK / DEF**: attack side and defense side.\n"
+            "- **Rating**: VLR's composite per-round rating, round-weighted "
+            "across maps.\n"
+            "- **Opening duel**: the first kill or death of a round; the win rate "
+            "is first kills over opening duels.\n"
+            "- **Decider**: the final map of a series entered level on maps."
+        )
+
+
+# The optional per-team sections, in render order, that the section picker
+# (item 18) can hide so the user can focus the long column on what they want.
+TEAM_SECTIONS = [
+    "Record and form",
+    "Snapshot",
+    "Map splits",
+    "Pistol",
+    "Opening duels",
+    "Player stats",
+    "Player by map",
+    "Series pressure",
+    "Recent vs window",
+    "Roster timeline",
+    "Recent matches",
+    "Roster",
+]
+
+
+def render_team(conn, column, team, window, five_only, events, sections):
+    """Render one team's comparison column, limited to the chosen sections."""
     with column:
         st.header(team["name"])
         subtitle = team["league"].capitalize()
@@ -866,16 +1598,36 @@ def render_team(conn, column, team, window, five_only, events):
             st.image(team["logo"], width=80)
 
         render_stale_flag(conn, team)
+        render_window_summary(conn, team, window, events)
         five_names = current_five_set(conn, team) if five_only else None
-        render_record_and_form(conn, team, window, events)
-        render_snapshot(team)
-        render_map_splits(conn, team, window)
-        render_pistol(conn, team, window)
-        render_opening(conn, team, window, five_names)
-        render_player_stats(conn, team, window, five_names)
-        render_roster_timeline(conn, team, window)
-        render_recent(conn, team, window, events)
-        render_roster(conn, team)
+
+        def on(name):
+            return name in sections
+
+        if on("Record and form"):
+            render_record_and_form(conn, team, window, events)
+        if on("Snapshot"):
+            render_snapshot(team)
+        if on("Map splits"):
+            render_map_splits(conn, team, window)
+        if on("Pistol"):
+            render_pistol(conn, team, window)
+        if on("Opening duels"):
+            render_opening(conn, team, window, five_names)
+        if on("Player stats"):
+            render_player_stats(conn, team, window, five_names)
+        if on("Player by map"):
+            render_player_map_performance(conn, team, window, five_names)
+        if on("Series pressure"):
+            render_pressure(conn, team, window)
+        if on("Recent vs window"):
+            render_recent_vs_window(conn, team, window, events, five_names)
+        if on("Roster timeline"):
+            render_roster_timeline(conn, team, window)
+        if on("Recent matches"):
+            render_recent(conn, team, window, events)
+        if on("Roster"):
+            render_roster(conn, team)
 
 
 def run_incremental_refresh():
@@ -900,6 +1652,9 @@ def run_incremental_refresh():
                 scope="incremental", limit=REFRESH_DETAIL_LIMIT,
                 progress=status.write,
             )
+            # New rows are stored, so the cached reads are stale: clear them so
+            # the views recompute against the fresh data on the next rerun.
+            st.cache_data.clear()
             status.update(label="Refresh complete", state="complete")
             st.success(
                 f"Refreshed: {cheap['matches']} new match rows, "
@@ -949,6 +1704,79 @@ def render_freshness(conn):
             st.caption(note)
 
 
+WINDOW_MODES = ["All time", "Last 3 months", "Last 6 months", "Year to date",
+                "Custom range"]
+ENV_MODES = ["All", "International LAN", "Online/other"]
+VIEW_MODES = ["Side by side", "Aligned"]
+
+
+def _apply_url_state(teams):
+    """Seed the widget defaults from the URL once, so a link restores the view.
+
+    The selection, window, and toggles are encoded in the query string (item 16),
+    so a refresh or a bookmarked local link reopens the same comparison instead of
+    resetting to the default pair. Seeding runs once per session, before the
+    widgets are created, by writing their session_state keys; after that the
+    widgets own their state. Unknown or malformed values are ignored rather than
+    forced, so a hand-edited URL never crashes the app.
+    """
+    if st.session_state.get("_url_seeded"):
+        return
+    st.session_state["_url_seeded"] = True
+    params = st.query_params
+    id_to_index = {t["id"]: i for i, t in enumerate(teams)}
+
+    def seed_team(param, key):
+        raw = params.get(param)
+        try:
+            tid = int(raw) if raw is not None else None
+        except ValueError:
+            return
+        if tid in id_to_index:
+            st.session_state[key] = id_to_index[tid]
+
+    seed_team("a", "team_a")
+    seed_team("b", "team_b")
+    if params.get("win") in WINDOW_MODES:
+        st.session_state["dwmode"] = params["win"]
+    if params.get("env") in ENV_MODES:
+        st.session_state["env"] = params["env"]
+    if params.get("view") in VIEW_MODES:
+        st.session_state["view"] = params["view"]
+    if params.get("five") in ("0", "1"):
+        st.session_state["five"] = params["five"] == "1"
+
+
+def _write_url_state(teams, a, b):
+    """Reflect the current selection back into the URL (item 16).
+
+    Written only when it actually changed, so a settled selection does not loop
+    the app rerunning itself. The window, event, and view read their own widget
+    keys, which exist by the time this runs.
+    """
+    desired = {
+        "a": str(teams[a]["id"]),
+        "b": str(teams[b]["id"]),
+        "win": st.session_state.get("dwmode", "All time"),
+        "env": st.session_state.get("env", "All"),
+        "view": st.session_state.get("view", "Side by side"),
+        "five": "1" if st.session_state.get("five") else "0",
+    }
+    if dict(st.query_params) != desired:
+        st.query_params.from_dict(desired)
+
+
+def _swap_teams():
+    """Exchange the two team picks, the one-click swap (item 12).
+
+    Runs as a widget callback, before the rerun creates the selectboxes, so
+    swapping their stored indices is all it takes to flip which team sits left.
+    """
+    st.session_state["team_a"], st.session_state["team_b"] = (
+        st.session_state.get("team_b"), st.session_state.get("team_a"),
+    )
+
+
 def main():
     st.title("VALTrack")
     st.caption(
@@ -972,22 +1800,33 @@ def main():
             st.warning("The database holds fewer than two teams. Run the harvest first.")
             return
 
+        _apply_url_state(teams)
+        # Seed the default pick in session_state (unless the URL already did), so
+        # the selectboxes can rely on the key without also passing an index, which
+        # would otherwise clash with the session_state seeding.
+        st.session_state.setdefault("team_a", 0)
+        st.session_state.setdefault("team_b", min(1, len(teams) - 1))
         labels = [team_label(t) for t in teams]
         pick_left, pick_right = st.columns(2)
         with pick_left:
             a = st.selectbox(
-                "Team A", range(len(teams)), index=0,
+                "Team A", range(len(teams)),
                 format_func=lambda k: labels[k], key="team_a",
             )
         with pick_right:
             b = st.selectbox(
-                "Team B", range(len(teams)), index=1,
+                "Team B", range(len(teams)),
                 format_func=lambda k: labels[k], key="team_b",
             )
+        st.button(
+            "Swap A and B", on_click=_swap_teams,
+            help="Flip which team sits on the left without re-picking both.",
+        )
 
         window = choose_window(conn)
         five_only = st.checkbox(
             "Current five only (player figures)",
+            key="five",
             help=(
                 "Narrows the player statistics, opening duels, and player-versus-"
                 "player view to each team's current five. Team, map, and round "
@@ -997,8 +1836,9 @@ def main():
         )
         env = st.radio(
             "Event type",
-            ["All", "International LAN", "Online/other"],
+            ENV_MODES,
             horizontal=True,
+            key="env",
             help=(
                 "LAN versus online is inferred from event names, so it is best-"
                 "effort. It narrows the match-level figures: record, form, and "
@@ -1037,14 +1877,36 @@ def main():
             st.warning("Pick two different teams to compare.")
             return
 
+        _write_url_state(teams, a, b)
+
         st.divider()
         tab_teams, tab_matchup, tab_notes = st.tabs(
             ["Team comparison", "Matchup", "Notes and log"]
         )
         with tab_teams:
-            show_left, show_right = st.columns(2)
-            render_team(conn, show_left, team_a, window, five_only, events)
-            render_team(conn, show_right, team_b, window, five_only, events)
+            view = st.radio(
+                "View", VIEW_MODES, horizontal=True, key="view",
+                help=(
+                    "Side by side shows each team's full column. Aligned shows one "
+                    "shared table per stat with the gap between the teams."
+                ),
+            )
+            render_comparison_strip(conn, team_a, team_b, window, events, five_only)
+            render_glossary()
+            st.divider()
+            if view == "Aligned":
+                render_aligned(conn, team_a, team_b, window, events, five_only)
+            else:
+                sections = st.multiselect(
+                    "Sections to show", TEAM_SECTIONS, default=TEAM_SECTIONS,
+                    key="sections",
+                    help="Hide sections to focus the column on what you want.",
+                )
+                show_left, show_right = st.columns(2)
+                render_team(conn, show_left, team_a, window, five_only, events,
+                            sections)
+                render_team(conn, show_right, team_b, window, five_only, events,
+                            sections)
         with tab_matchup:
             render_veto_reconstruction(conn, team_a, team_b, window)
             render_head_to_head(conn, team_a, team_b, window, events)

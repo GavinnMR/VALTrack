@@ -72,10 +72,36 @@ def list_log_entries(conn):
     ).fetchall()
 
 
-def resolve_log_entry(conn, entry_id, outcome):
-    """Record the actual outcome for a log entry and stamp when it was resolved."""
+def resolve_log_entry(conn, entry_id, outcome, outcome_side=None):
+    """Record the actual outcome for a log entry and stamp when it was resolved.
+
+    `outcome` is the human-readable result (for example a score). `outcome_side`
+    is the structured winner, "a" or "b" (or None when left open), so past calls
+    can be reviewed as cleanly resolved rather than parsed back out of free text.
+    """
     conn.execute(
-        "UPDATE matchup_log SET outcome = ?, resolved_at = ? WHERE id = ?",
-        (outcome, _now(), entry_id),
+        "UPDATE matchup_log SET outcome = ?, outcome_side = ?, resolved_at = ? "
+        "WHERE id = ?",
+        (outcome, outcome_side, _now(), entry_id),
     )
+    conn.commit()
+
+
+def update_log_entry(conn, entry_id, note, confidence):
+    """Edit the pre-match note and confidence of an existing log entry.
+
+    Fixing a typo in a note or a misjudged confidence should not mean deleting and
+    re-adding the call, so this updates them in place. The outcome and timestamps
+    are left untouched.
+    """
+    conn.execute(
+        "UPDATE matchup_log SET note = ?, confidence = ? WHERE id = ?",
+        (note, confidence, entry_id),
+    )
+    conn.commit()
+
+
+def delete_log_entry(conn, entry_id):
+    """Remove a log entry entirely, for a mistaken or unwanted call."""
+    conn.execute("DELETE FROM matchup_log WHERE id = ?", (entry_id,))
     conn.commit()

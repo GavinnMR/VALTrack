@@ -564,3 +564,133 @@ def match_date_bounds(conn):
         "FROM matches WHERE date IS NOT NULL"
     ).fetchone()
     return (row["mn"], row["mx"])
+
+
+def team_series_results(conn, team_id, window=None):
+    """Per-map results for the team's series, with the series score, for pressure.
+
+    One row per map the team played: match_id, map_order, the map winner_name, and
+    the series scores from this team's point of view (team_series_score and
+    opp_series_score, taken from the parent match and identical across a match's
+    rows). The team's slot is resolved by id so the series score is always read
+    from the right side. The date filter is on the parent match. Feeds
+    stats.pressure_stats. Returns [] when the team has no stored detail.
+    """
+    name = _team_name(conn, team_id)
+    if name is None:
+        return []
+    window = window or DateWindow.all_time()
+    wclause, wparams = window.clause("m.date")
+    return conn.execute(
+        f"""
+        SELECT mr.match_id, mr.map_order, mr.winner_name,
+               CASE WHEN m.team1_id = ? THEN m.team1_score ELSE m.team2_score END
+                   AS team_series_score,
+               CASE WHEN m.team1_id = ? THEN m.team2_score ELSE m.team1_score END
+                   AS opp_series_score
+        FROM map_results mr
+        JOIN matches m ON m.match_id = mr.match_id
+        WHERE (mr.team1_name = ? OR mr.team2_name = ?)
+          AND {wclause}
+        """,
+        [team_id, team_id, name, name, *wparams],
+    ).fetchall()
+
+
+def meeting_maps(conn, match_id):
+    """The per-map results for a single match, in map order, for the H2H detail.
+
+    One row per map: map_name, map_order, the two side names and scores, and the
+    winner. Returns [] when no per-map detail is stored for the match, which is
+    the honest empty state for an older meeting the detail harvest has not reached.
+    """
+    return conn.execute(
+        """
+        SELECT map_name, map_order, team1_name, team2_name,
+               team1_score, team2_score, winner_name
+        FROM map_results
+        WHERE match_id = ?
+        ORDER BY CASE WHEN map_order IS NULL THEN 1 ELSE 0 END, map_order
+        """,
+        (match_id,),
+    ).fetchall()
+
+
+def meeting_lineup(conn, match_id, team_name):
+    """The distinct players a team actually fielded in one match, for H2H detail.
+
+    Reading the lineup from who played sidesteps the unreliable roster-change
+    table and reflects the side that actually took the server that day. Returns a
+    list of player names, or [] when no per-map detail is stored for the match.
+    """
+    rows = conn.execute(
+        """
+        SELECT DISTINCT player_name
+        FROM map_player_stats
+        WHERE match_id = ? AND team_name = ? AND player_name IS NOT NULL
+        ORDER BY player_name COLLATE NOCASE
+        """,
+        (match_id, team_name),
+    ).fetchall()
+    return [r["player_name"] for r in rows]
+
+
+def detail_coverage(conn, team_id, window=None, events=None):
+    """How many of a team's in-range matches carry per-match detail.
+
+    Returns {detailed, total} where total is the team's matches in the window and
+    event filter, and detailed is how many of those have had the expensive
+    per-match pass stored (details_fetched_at set). This is what tells the user how
+    complete a detail-derived figure actually is, rather than leaving the partial
+    harvest invisible.
+    """
+    window = window or DateWindow.all_time()
+    events = events or EventFilter()
+    wclause, wparams = window.clause("date")
+    eclause, eparams = events.clause("event_name")
+    row = conn.execute(
+        f"""
+        SELECT COUNT(*) AS total,
+               SUM(CASE WHEN details_fetched_at IS NOT NULL THEN 1 ELSE 0 END)
+                   AS detailed
+        FROM matches
+        WHERE (team1_id = ? OR team2_id = ?)
+          AND {wclause}
+          AND {eclause}
+        """,
+        [team_id, team_id, *wparams, *eparams],
+    ).fetchone()
+    return {"total": row["total"] or 0, "detailed": row["detailed"] or 0}
+
+
+def team_window_summary(conn, team_id, window=None, events=None):
+    """A one-line summary of how much data backs a team's column.
+
+    Returns {total, decided, min_date, max_date} over the team's matches in the
+    window and event filter, so the app can say up front how many matches and what
+    date span sit behind everything below. The team can be in either slot.
+    """
+    window = window or DateWindow.all_time()
+    events = events or EventFilter()
+    wclause, wparams = window.clause("date")
+    eclause, eparams = events.clause("event_name")
+    row = conn.execute(
+        f"""
+        SELECT COUNT(*) AS total,
+               SUM(CASE
+                   WHEN team1_score IS NOT NULL AND team2_score IS NOT NULL
+                        AND team1_score != team2_score THEN 1 ELSE 0 END) AS decided,
+               MIN(date) AS mn, MAX(date) AS mx
+        FROM matches
+        WHERE (team1_id = ? OR team2_id = ?)
+          AND {wclause}
+          AND {eclause}
+        """,
+        [team_id, team_id, *wparams, *eparams],
+    ).fetchone()
+    return {
+        "total": row["total"] or 0,
+        "decided": row["decided"] or 0,
+        "min_date": row["mn"],
+        "max_date": row["mx"],
+    }

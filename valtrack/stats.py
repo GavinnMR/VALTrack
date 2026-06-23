@@ -517,6 +517,176 @@ def per_map_splits(map_rows, round_rows, team_name):
     return rows
 
 
+def player_map_aggregates(rows, team_name):
+    """Per-player stat lines for one team, split out by map.
+
+    Crosses the per-player figures with the map they were earned on, so a player
+    who pops off on Ascent but goes quiet on Lotus shows two different lines
+    rather than one blended average. Each row is the same shape player_aggregates
+    reads (it carries map_name from the query), so this groups the rows by map and
+    runs the exact same round-weighted aggregation per map, reusing that tested
+    logic untouched.
+
+    Returns a dict keyed by map name, each value the player_aggregates list for
+    that map (already sorted by maps played then name). Rows with no map name are
+    skipped, since a line with no map cannot be placed. Per-player-per-map samples
+    are thin, so the caller flags small ones the same way it does elsewhere; that
+    is the point of splitting by map, not a footnote.
+    """
+    by_map = {}
+    for row in rows:
+        name = row["map_name"]
+        if not name:
+            continue
+        by_map.setdefault(name, []).append(row)
+    return {m: player_aggregates(rs, team_name) for m, rs in by_map.items()}
+
+
+def team_rating(players):
+    """One round-weighted team rating from a player_aggregates list, or None.
+
+    Each player already carries a round-weighted rating and a rounds count, so the
+    team figure weights each player's rating by the rounds they played, the same
+    way the per-player rating weighted its maps. A player with no rating or no
+    rounds drops out rather than pulling the average toward zero. Returns None when
+    nothing contributes, which is honest rather than a fabricated 0. This is a
+    headline summary number, not a ranking: it is shown beside the opponent's with
+    the gap, never folded into a winner call.
+    """
+    return _weighted_mean((p["rating"], p["rounds"]) for p in players)
+
+
+def pressure_stats(rows, team_name):
+    """Decider, distance, and comeback figures for one team's series.
+
+    `rows` are the per-map results for the team's matches, each with match_id,
+    map_order, winner_name (the map winner), and the series scores from the team's
+    point of view (team_series_score and opp_series_score, identical on every row
+    of a match). Rows with no map_order are skipped from the ordering.
+
+    The series format (Bo3 versus Bo5) is not stored, so the definitions avoid
+    assuming one:
+      - decider: the final map of a series entered level on maps, with at least
+        one map won by each side going in. A sweep's last map (not level going in)
+        and a lone Bo1 map (no map won by each side) are therefore not deciders.
+      - decider win%: the team won that deciding map, over deciders played.
+      - distance win%: the team won the series, over deciders played (series
+        outcome read from the series score; closely related to the decider map
+        result, kept as a separate series-level figure rather than folded in).
+      - comeback: lost the opening map but still won the series, reported as a
+        count over the series where the team lost map 1 (the comeback chances).
+
+    These come back as separate figures on purpose. They are never combined into a
+    single "clutch" or "resilience" rating, which would be the composite the
+    charter forbids.
+    """
+    series = {}
+    for row in rows:
+        sid = row["match_id"]
+        s = series.setdefault(sid, {
+            "maps": [],
+            "team_series": row["team_series_score"],
+            "opp_series": row["opp_series_score"],
+        })
+        s["maps"].append(row)
+
+    decider_played = decider_won = distance_won = 0
+    comeback_chances = comeback_won = 0
+    for s in series.values():
+        maps = sorted(
+            (m for m in s["maps"] if m["map_order"] is not None),
+            key=lambda m: m["map_order"],
+        )
+        if not maps:
+            continue
+        team_series, opp_series = s["team_series"], s["opp_series"]
+        series_decided = (
+            team_series is not None and opp_series is not None
+            and team_series != opp_series
+        )
+        won_series = series_decided and team_series > opp_series
+
+        # A comeback is dropping the opening map and still taking the series.
+        first = maps[0]["winner_name"]
+        if series_decided and first is not None and first != team_name:
+            comeback_chances += 1
+            if won_series:
+                comeback_won += 1
+
+        # The decider is the final map when the map score was level going into it,
+        # with at least one map already won by each side (so a sweep is excluded).
+        team_maps = opp_maps = 0
+        for m in maps[:-1]:
+            winner = m["winner_name"]
+            if winner is None:
+                continue
+            if winner == team_name:
+                team_maps += 1
+            else:
+                opp_maps += 1
+        if team_maps >= 1 and opp_maps >= 1 and team_maps == opp_maps:
+            decider_played += 1
+            if maps[-1]["winner_name"] == team_name:
+                decider_won += 1
+            if won_series:
+                distance_won += 1
+
+    return {
+        "decider_played": decider_played,
+        "decider_won": decider_won,
+        "decider_winrate": _rate(decider_won, decider_played),
+        "distance_played": decider_played,
+        "distance_series_won": distance_won,
+        "distance_winrate": _rate(distance_won, decider_played),
+        "comeback_chances": comeback_chances,
+        "comeback_won": comeback_won,
+        "comeback_rate": _rate(comeback_won, comeback_chances),
+    }
+
+
+def map_pool_overlap(a_splits, b_splits, pool=None, strong_threshold=0.5):
+    """Mark where two teams' per-map strengths collide and where they diverge.
+
+    `a_splits` and `b_splits` are per-map dicts keyed by map name (as
+    per_map_splits returns, reshaped by map), each value carrying map_winrate.
+    `pool` restricts and orders the maps; when omitted, every map either team has
+    is used, sorted by name. A map at or above strong_threshold is a strength for
+    that team, below it a weakness.
+
+    Each map is labeled descriptively and nothing more:
+      - "shared strength": both teams strong (likely a coin flip there),
+      - "shared weakness": both teams weak,
+      - "split": one strong, one weak (the veto battle decides it),
+      - "insufficient": either team has no decided map there to judge.
+
+    This stays strictly descriptive. It shows each team's win rate and marks the
+    map, and stops. It never ranks the maps into a "who wins the veto" answer,
+    which would be the verdict the charter forbids.
+    """
+    names = pool if pool is not None else sorted(set(a_splits) | set(b_splits))
+    out = []
+    for name in names:
+        a = a_splits.get(name)
+        b = b_splits.get(name)
+        a_win = a["map_winrate"] if a else None
+        b_win = b["map_winrate"] if b else None
+        if a_win is None or b_win is None:
+            label = "insufficient"
+        elif a_win >= strong_threshold and b_win >= strong_threshold:
+            label = "shared strength"
+        elif a_win < strong_threshold and b_win < strong_threshold:
+            label = "shared weakness"
+        else:
+            label = "split"
+        out.append({
+            "map": name,
+            "a_winrate": a_win,
+            "b_winrate": b_win,
+            "label": label,
+        })
+    return out
+
+
 def primary_role(agent_pool):
     """Infer a player's role from their agent pool (most maps wins).
 

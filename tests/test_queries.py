@@ -412,3 +412,127 @@ def test_match_date_bounds(tmp_path):
     conn.commit()
     assert match_date_bounds(conn) == ("2022-06-15", "2024-03-01")
     conn.close()
+
+
+def _add_ordered_map(conn, match_id, order, map_name, t1_name, t2_name, winner):
+    conn.execute(
+        """
+        INSERT INTO map_results (match_id, map_order, map_name,
+                                 team1_name, team2_name, winner_name)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (match_id, order, map_name, t1_name, t2_name, winner),
+    )
+
+
+def test_team_series_results_frames_series_score_by_slot(tmp_path):
+    from valtrack.queries import team_series_results
+
+    conn = _fresh_conn(tmp_path)
+    _add_team(conn, 100, "Alpha")
+    _add_team(conn, 200, "Beta")
+    # Alpha is team1 here, won the series 2-1.
+    _add_match(conn, 1, 100, 200, 2, 1, "2024-01-10")
+    _add_ordered_map(conn, 1, 1, "Ascent", "Alpha", "Beta", "Alpha")
+    _add_ordered_map(conn, 1, 2, "Bind", "Alpha", "Beta", "Beta")
+    _add_ordered_map(conn, 1, 3, "Lotus", "Alpha", "Beta", "Alpha")
+    # Alpha is team2 here, lost the series 1-2; score must still frame from Alpha.
+    _add_match(conn, 2, 200, 100, 2, 1, "2024-02-10")
+    _add_ordered_map(conn, 2, 1, "Split", "Beta", "Alpha", "Beta")
+    conn.commit()
+
+    rows = team_series_results(conn, 100)
+    by_match = {}
+    for r in rows:
+        by_match.setdefault(r["match_id"], r)
+    # Match 1: Alpha is team1, so 2-1 from Alpha's view.
+    assert by_match[1]["team_series_score"] == 2
+    assert by_match[1]["opp_series_score"] == 1
+    # Match 2: Alpha is team2 with score 1, opponent 2.
+    assert by_match[2]["team_series_score"] == 1
+    assert by_match[2]["opp_series_score"] == 2
+    assert team_series_results(conn, 999) == []
+    conn.close()
+
+
+def test_team_series_results_windowed(tmp_path):
+    from valtrack.queries import team_series_results
+
+    conn = _fresh_conn(tmp_path)
+    _add_team(conn, 100, "Alpha")
+    _add_match(conn, 1, 100, 200, 2, 0, "2024-01-10")
+    _add_ordered_map(conn, 1, 1, "Ascent", "Alpha", "Beta", "Alpha")
+    _add_match(conn, 2, 100, 200, 2, 0, "2024-09-10")
+    _add_ordered_map(conn, 2, 1, "Bind", "Alpha", "Beta", "Alpha")
+    conn.commit()
+    w = DateWindow(date(2024, 1, 1), date(2024, 6, 30))
+    rows = team_series_results(conn, 100, w)
+    assert {r["match_id"] for r in rows} == {1}
+    conn.close()
+
+
+def test_meeting_maps_and_lineup(tmp_path):
+    from valtrack.queries import meeting_lineup, meeting_maps
+
+    conn = _fresh_conn(tmp_path)
+    _add_match(conn, 1, 100, 200, 2, 0, "2024-01-10")
+    _add_ordered_map(conn, 1, 2, "Bind", "Alpha", "Beta", "Alpha")
+    _add_ordered_map(conn, 1, 1, "Ascent", "Alpha", "Beta", "Alpha")
+    _add_player_stat(conn, 1, "Ascent", "ace", "Alpha")
+    _add_player_stat(conn, 1, "Bind", "ace", "Alpha")   # same player, second map
+    _add_player_stat(conn, 1, "Ascent", "bee", "Alpha")
+    _add_player_stat(conn, 1, "Ascent", "zee", "Beta")
+    conn.commit()
+
+    maps = meeting_maps(conn, 1)
+    # Ordered by map_order, so Ascent (1) before Bind (2).
+    assert [m["map_name"] for m in maps] == ["Ascent", "Bind"]
+    # Lineup is distinct players for the team, not one row per map.
+    assert meeting_lineup(conn, 1, "Alpha") == ["ace", "bee"]
+    assert meeting_lineup(conn, 1, "Beta") == ["zee"]
+    # No detail stored is the honest empty state.
+    assert meeting_maps(conn, 999) == []
+    assert meeting_lineup(conn, 999, "Alpha") == []
+    conn.close()
+
+
+def test_detail_coverage(tmp_path):
+    from valtrack.queries import detail_coverage
+
+    conn = _fresh_conn(tmp_path)
+    # Two matches in range, one detailed; one match out of range and detailed.
+    conn.execute(
+        "INSERT INTO matches (match_id, team1_id, team2_id, team1_score, "
+        "team2_score, date, details_fetched_at) "
+        "VALUES (1, 100, 200, 2, 0, '2024-03-01', '2024-03-02')"
+    )
+    conn.execute(
+        "INSERT INTO matches (match_id, team1_id, team2_id, team1_score, "
+        "team2_score, date) VALUES (2, 100, 200, 2, 1, '2024-03-05')"
+    )
+    conn.execute(
+        "INSERT INTO matches (match_id, team1_id, team2_id, team1_score, "
+        "team2_score, date, details_fetched_at) "
+        "VALUES (3, 100, 200, 2, 0, '2023-01-01', '2023-01-02')"
+    )
+    conn.commit()
+    w = DateWindow(date(2024, 1, 1), date(2024, 12, 31))
+    cov = detail_coverage(conn, 100, w)
+    assert cov == {"detailed": 1, "total": 2}
+    # All time sees the older detailed match too.
+    assert detail_coverage(conn, 100) == {"detailed": 2, "total": 3}
+    conn.close()
+
+
+def test_team_window_summary(tmp_path):
+    from valtrack.queries import team_window_summary
+
+    conn = _fresh_conn(tmp_path)
+    _add_match(conn, 1, 100, 200, 2, 0, "2024-01-10")        # decided
+    _add_match(conn, 2, 200, 100, 1, 1, "2024-05-10")        # tie, not decided
+    _add_match(conn, 3, 100, 200, None, None, "2024-03-10")  # undecided
+    conn.commit()
+    s = team_window_summary(conn, 100)
+    assert s["total"] == 3 and s["decided"] == 1
+    assert s["min_date"] == "2024-01-10" and s["max_date"] == "2024-05-10"
+    conn.close()

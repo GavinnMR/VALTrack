@@ -52,3 +52,38 @@ def test_matchup_log_newest_first(tmp_path):
     # Newest first, so the second entry leads.
     assert notes == ["second", "first"]
     conn.close()
+
+
+def test_matchup_log_structured_outcome(tmp_path):
+    conn = _conn(tmp_path)
+    journal.add_log_entry(conn, 100, "Alpha", 200, "Beta", "lean Alpha", "high")
+    e = journal.list_log_entries(conn)[0]
+    journal.resolve_log_entry(conn, e["id"], "Alpha won 2-1", outcome_side="a")
+    e2 = journal.list_log_entries(conn)[0]
+    assert e2["outcome"] == "Alpha won 2-1"
+    assert e2["outcome_side"] == "a"
+    assert e2["resolved_at"] is not None
+    conn.close()
+
+
+def test_matchup_log_edit_note_and_confidence(tmp_path):
+    conn = _conn(tmp_path)
+    journal.add_log_entry(conn, 1, "A", 2, "B", "typpo", "low")
+    e = journal.list_log_entries(conn)[0]
+    journal.update_log_entry(conn, e["id"], "fixed note", "high")
+    e2 = journal.list_log_entries(conn)[0]
+    assert e2["note"] == "fixed note" and e2["confidence"] == "high"
+    # Editing does not resolve the entry.
+    assert e2["outcome"] is None
+    conn.close()
+
+
+def test_matchup_log_delete(tmp_path):
+    conn = _conn(tmp_path)
+    journal.add_log_entry(conn, 1, "A", 2, "B", "first", "low")
+    journal.add_log_entry(conn, 3, "C", 4, "D", "second", "medium")
+    entries = journal.list_log_entries(conn)
+    journal.delete_log_entry(conn, entries[0]["id"])  # remove the newest
+    remaining = journal.list_log_entries(conn)
+    assert [e["note"] for e in remaining] == ["first"]
+    conn.close()

@@ -27,6 +27,7 @@ _ADDED_COLUMNS = [
     ("map_player_stats", "first_kills_def", "INTEGER"),
     ("map_player_stats", "first_deaths_atk", "INTEGER"),
     ("map_player_stats", "first_deaths_def", "INTEGER"),
+    ("matchup_log", "outcome_side", "TEXT"),
 ]
 
 
@@ -76,16 +77,17 @@ CREATE TABLE IF NOT EXISTS matchup_notes (
     updated_at TEXT
 );
 CREATE TABLE IF NOT EXISTS matchup_log (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    team_a_id   INTEGER,
-    team_a_name TEXT,
-    team_b_id   INTEGER,
-    team_b_name TEXT,
-    note        TEXT,
-    confidence  TEXT,
-    outcome     TEXT,
-    created_at  TEXT,
-    resolved_at TEXT
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    team_a_id    INTEGER,
+    team_a_name  TEXT,
+    team_b_id    INTEGER,
+    team_b_name  TEXT,
+    note         TEXT,
+    confidence   TEXT,
+    outcome      TEXT,
+    outcome_side TEXT,
+    created_at   TEXT,
+    resolved_at  TEXT
 );
 """
 

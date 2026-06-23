@@ -11,13 +11,17 @@ from valtrack.stats import (
     form_and_streak,
     is_small_sample,
     keep_players,
+    map_pool_overlap,
     map_winrates,
     opening_duels,
     per_map_splits,
     pistol_winrate,
     player_aggregates,
+    player_map_aggregates,
+    pressure_stats,
     primary_role,
     side_winrates,
+    team_rating,
 )
 
 
@@ -635,3 +639,164 @@ def test_keep_players_filters_by_name_set():
 def test_keep_players_none_passes_through():
     rows = [{"player_name": "x"}]
     assert keep_players(rows, None) is rows
+
+
+# --- per-map player performance (item 7) ------------------------------------
+
+def _pstat_map(map_name, **kw):
+    """A per-map player line with its map name, for player_map_aggregates."""
+    row = _pstat(kw.pop("team", "A"), kw.pop("player", "ace"),
+                 kw.pop("rounds", 20), **kw)
+    row["map_name"] = map_name
+    return row
+
+
+def test_player_map_aggregates_splits_a_player_by_map():
+    rows = [
+        _pstat_map("Ascent", player="ace", rounds=20, acs=300.0, kills=20, deaths=8),
+        _pstat_map("Ascent", player="ace", rounds=20, acs=260.0, kills=18, deaths=10),
+        _pstat_map("Lotus", player="ace", rounds=20, acs=120.0, kills=8, deaths=16),
+        _pstat_map("Ascent", player="bee", rounds=20, acs=180.0),
+    ]
+    out = player_map_aggregates(rows, "A")
+    assert set(out) == {"Ascent", "Lotus"}
+    # On Ascent ace has two maps and leads bee; on Lotus only ace, much weaker.
+    ascent_ace = next(p for p in out["Ascent"] if p["player_name"] == "ace")
+    assert ascent_ace["maps"] == 2
+    assert ascent_ace["acs"] == (300.0 + 260.0) / 2
+    lotus_ace = out["Lotus"][0]
+    assert lotus_ace["maps"] == 1 and lotus_ace["acs"] == 120.0
+
+
+def test_player_map_aggregates_skips_rows_with_no_map_and_opponent():
+    rows = [
+        _pstat_map("Bind", player="ace", rounds=20),
+        {**_pstat("A", "ace", 20), "map_name": None},   # no map, dropped
+        _pstat_map("Bind", team="B", player="zee", rounds=20),  # opponent
+    ]
+    out = player_map_aggregates(rows, "A")
+    assert set(out) == {"Bind"}
+    assert [p["player_name"] for p in out["Bind"]] == ["ace"]
+
+
+def test_player_map_aggregates_empty():
+    assert player_map_aggregates([], "A") == {}
+
+
+# --- team rating headline (item 2) ------------------------------------------
+
+def test_team_rating_is_round_weighted_across_players():
+    players = [
+        {"rating": 1.0, "rounds": 100},
+        {"rating": 2.0, "rounds": 300},
+    ]
+    assert team_rating(players) == (1.0 * 100 + 2.0 * 300) / 400
+
+
+def test_team_rating_skips_missing_and_is_none_when_empty():
+    players = [
+        {"rating": None, "rounds": 100},   # no rating, skipped
+        {"rating": 1.5, "rounds": 0},      # no rounds, skipped
+        {"rating": 1.2, "rounds": 50},
+    ]
+    assert team_rating(players) == 1.2
+    assert team_rating([]) is None
+
+
+# --- pressure: decider, distance, comeback (item 9) -------------------------
+
+def _series(match_id, order_winners, team_score, opp_score):
+    """Per-map rows for one series: order_winners is [(map_order, winner), ...]."""
+    return [
+        {
+            "match_id": match_id,
+            "map_order": order,
+            "winner_name": winner,
+            "team_series_score": team_score,
+            "opp_series_score": opp_score,
+        }
+        for order, winner in order_winners
+    ]
+
+
+def test_pressure_decider_counts_level_final_map_only():
+    rows = []
+    # A 2-1 series A wins: maps W, L, W. Going into map 3 it is 1-1, a decider.
+    rows += _series(1, [(1, "A"), (2, "B"), (3, "A")], 2, 1)
+    # A 2-0 sweep: going into map 2 it is 1-0, not level, so no decider.
+    rows += _series(2, [(1, "A"), (2, "A")], 2, 0)
+    out = pressure_stats(rows, "A")
+    assert out["decider_played"] == 1
+    assert out["decider_won"] == 1
+    assert out["decider_winrate"] == 1.0
+    # Won the series in the one decider, so distance win% is 1.0 over 1.
+    assert out["distance_played"] == 1
+    assert out["distance_series_won"] == 1
+    assert out["distance_winrate"] == 1.0
+
+
+def test_pressure_decider_lost_and_distance_tracks_series():
+    # A 1-2 loss: maps W, L, L. Going into map 3 it is 1-1, a decider A lost.
+    rows = _series(1, [(1, "A"), (2, "B"), (3, "B")], 1, 2)
+    out = pressure_stats(rows, "A")
+    assert out["decider_played"] == 1 and out["decider_won"] == 0
+    assert out["decider_winrate"] == 0.0
+    assert out["distance_series_won"] == 0 and out["distance_winrate"] == 0.0
+
+
+def test_pressure_comeback_lost_opener_won_series():
+    rows = []
+    # Lost map 1, won the series 2-1: a comeback.
+    rows += _series(1, [(1, "B"), (2, "A"), (3, "A")], 2, 1)
+    # Lost map 1, lost the series: a comeback chance not converted.
+    rows += _series(2, [(1, "B"), (2, "A"), (3, "B")], 1, 2)
+    # Won map 1: not a comeback chance at all.
+    rows += _series(3, [(1, "A"), (2, "A")], 2, 0)
+    out = pressure_stats(rows, "A")
+    assert out["comeback_chances"] == 2
+    assert out["comeback_won"] == 1
+    assert out["comeback_rate"] == 1 / 2
+
+
+def test_pressure_bo1_is_not_a_decider():
+    # A single decided map: level going in is 0-0 with no map won by each side,
+    # so it must not count as a decider.
+    rows = _series(1, [(1, "A")], 1, 0)
+    out = pressure_stats(rows, "A")
+    assert out["decider_played"] == 0
+
+
+def test_pressure_skips_maps_with_no_order_and_handles_empty():
+    rows = _series(1, [(None, "A"), (None, "B")], 2, 1)
+    out = pressure_stats(rows, "A")
+    assert out["decider_played"] == 0
+    assert pressure_stats([], "A")["decider_winrate"] is None
+
+
+# --- map-pool overlap lens (item 11) ----------------------------------------
+
+def _split(winrate):
+    return {"map_winrate": winrate}
+
+
+def test_map_pool_overlap_labels_each_map():
+    a = {"Ascent": _split(0.7), "Bind": _split(0.3), "Lotus": _split(0.6),
+         "Haven": _split(0.4)}
+    b = {"Ascent": _split(0.8), "Bind": _split(0.2), "Lotus": _split(0.4),
+         "Haven": _split(None)}
+    pool = ["Ascent", "Bind", "Lotus", "Haven"]
+    out = {row["map"]: row["label"] for row in map_pool_overlap(a, b, pool)}
+    assert out["Ascent"] == "shared strength"   # both >= 0.5
+    assert out["Bind"] == "shared weakness"     # both < 0.5
+    assert out["Lotus"] == "split"              # one strong, one weak
+    assert out["Haven"] == "insufficient"       # b has no decided map
+
+
+def test_map_pool_overlap_defaults_to_union_sorted():
+    a = {"Bind": _split(0.6)}
+    b = {"Ascent": _split(0.6)}
+    out = map_pool_overlap(a, b)
+    # No pool given: every map either team has, sorted by name.
+    assert [row["map"] for row in out] == ["Ascent", "Bind"]
+    # Each is insufficient since only one team has each map.
+    assert all(row["label"] == "insufficient" for row in out)

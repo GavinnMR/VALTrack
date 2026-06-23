@@ -89,6 +89,15 @@ def _seed(path):
     conn.close()
 
 
+def _by_key(elements, key):
+    """Find a widget by its key, so the test does not depend on widget order."""
+    return next(e for e in elements if e.key == key)
+
+
+def _by_label(elements, label):
+    return next(e for e in elements if e.label == label)
+
+
 def test_app_boots_and_toggles_without_exception(tmp_path, monkeypatch):
     path = tmp_path / "app.db"
     _seed(path)
@@ -97,13 +106,49 @@ def test_app_boots_and_toggles_without_exception(tmp_path, monkeypatch):
     real_connect = db.connect
     monkeypatch.setattr(db, "connect", lambda *a, **k: real_connect(path))
 
-    at = AppTest.from_file("app.py").run(timeout=90)
+    at = AppTest.from_file("app.py").run(timeout=120)
     assert not at.exception
+    # The at-a-glance strip and other tables render.
+    assert len(at.dataframe) > 0
 
     # Current-five filter on.
-    at.checkbox[0].set_value(True).run(timeout=90)
+    _by_key(at.checkbox, "five").set_value(True).run(timeout=120)
     assert not at.exception
 
     # LAN event filter on (the seeded match is a Masters event).
-    at.radio[1].set_value("International LAN").run(timeout=90)
+    _by_key(at.radio, "env").set_value("International LAN").run(timeout=120)
+    assert not at.exception
+
+    # A date preset that excludes the seeded match exercises the empty states.
+    _by_key(at.radio, "env").set_value("All").run(timeout=120)
+    _by_key(at.radio, "dwmode").set_value("Last 3 months").run(timeout=120)
+    assert not at.exception
+
+    # Back to all time, then the aligned view with its delta tables.
+    _by_key(at.radio, "dwmode").set_value("All time").run(timeout=120)
+    _by_key(at.radio, "view").set_value("Aligned").run(timeout=120)
+    assert not at.exception
+
+    # Swap the two teams.
+    _by_key(at.radio, "view").set_value("Side by side").run(timeout=120)
+    _by_label(at.button, "Swap A and B").click().run(timeout=120)
+    assert not at.exception
+
+
+def test_app_matchup_log_add_and_resolve(tmp_path, monkeypatch):
+    path = tmp_path / "app.db"
+    _seed(path)
+    monkeypatch.setattr(db, "DB_PATH", path)
+    real_connect = db.connect
+    monkeypatch.setattr(db, "connect", lambda *a, **k: real_connect(path))
+
+    at = AppTest.from_file("app.py").run(timeout=120)
+    # Add a log entry through the form, then resolve it with a structured winner.
+    _by_key(at.text_area, "log_note_input").set_value("lean Alpha")
+    _by_label(at.button, "Add to log").click().run(timeout=120)
+    assert not at.exception
+    # The structured winner radio and the save button now exist for the entry.
+    save = [b for b in at.button if b.label == "Save outcome"]
+    assert save
+    save[0].click().run(timeout=120)
     assert not at.exception

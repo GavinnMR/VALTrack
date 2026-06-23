@@ -227,14 +227,15 @@ CREATE TABLE IF NOT EXISTS matchup_notes (
 -- A personal matchup log: record a matchup with a pre-match note and confidence,
 -- then later record the actual outcome and review past entries.
 CREATE TABLE IF NOT EXISTS matchup_log (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    team_a_id   INTEGER,
-    team_a_name TEXT,
-    team_b_id   INTEGER,
-    team_b_name TEXT,
-    note        TEXT,
-    confidence  TEXT,
-    outcome     TEXT,          -- null until the user records the result
-    created_at  TEXT,
-    resolved_at TEXT
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    team_a_id    INTEGER,
+    team_a_name  TEXT,
+    team_b_id    INTEGER,
+    team_b_name  TEXT,
+    note         TEXT,
+    confidence   TEXT,
+    outcome      TEXT,          -- null until the user records the result
+    outcome_side TEXT,          -- structured winner, "a" or "b", null until resolved
+    created_at   TEXT,
+    resolved_at  TEXT
 );
