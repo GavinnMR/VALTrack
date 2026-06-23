@@ -1,0 +1,27 @@
+name: tests
+
+# Run the pure-logic and aggregation test suite on every push and pull request.
+# The aggregation logic is the part that can silently corrupt the comparison, so
+# this guards it. The path is scoped to tests/ on purpose: a bare pytest would try
+# to collect the gitignored vlrggapi clone's own tests, which are not present here
+# and would fail collection.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+      - name: Run tests
+        run: python -m pytest tests/ -q

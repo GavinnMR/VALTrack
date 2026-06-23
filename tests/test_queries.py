@@ -100,6 +100,81 @@ def test_record_is_zero_for_team_with_no_matches(tmp_path):
     conn.close()
 
 
+def _seed_detail_match(conn, team_name="Alpha", opp_name="Beta"):
+    """A team, a dated match, a map result, and two player rows, for detail reads."""
+    conn.execute(
+        "INSERT INTO teams (id, name, tag, regional_rank) VALUES (1, ?, 'ALP', 5)",
+        (team_name,),
+    )
+    conn.execute(
+        "INSERT INTO teams (id, name, tag, regional_rank) VALUES (2, ?, 'BET', 9)",
+        (opp_name,),
+    )
+    conn.execute(
+        "INSERT INTO matches (match_id, team1_id, team1_name, team2_id, team2_name, "
+        "team1_score, team2_score, date) VALUES (1, 1, ?, 2, ?, 1, 0, '2026-05-01')",
+        (team_name, opp_name),
+    )
+    conn.execute(
+        "INSERT INTO map_results (match_id, map_name, map_order, team1_name, "
+        "team2_name, team1_score, team2_score, winner_name) "
+        "VALUES (1, 'Lotus', 1, ?, ?, 13, 7, ?)",
+        (team_name, opp_name, team_name),
+    )
+    for name, agent in (("a1", "Jett"), ("a2", "Omen")):
+        conn.execute(
+            "INSERT INTO map_player_stats (match_id, map_name, player_name, "
+            "team_name, agent, clutch_won, clutch_lost) "
+            "VALUES (1, 'Lotus', ?, ?, ?, 2, 1)",
+            (name, team_name, agent),
+        )
+    conn.commit()
+
+
+def test_team_compositions_reads_agents_and_winner(tmp_path):
+    from valtrack.queries import team_compositions
+
+    conn = _fresh_conn(tmp_path)
+    _seed_detail_match(conn)
+    rows = team_compositions(conn, 1)
+    agents = sorted(r["agent"] for r in rows)
+    assert agents == ["Jett", "Omen"]
+    assert all(r["winner_name"] == "Alpha" and r["map_name"] == "Lotus" for r in rows)
+    conn.close()
+
+
+def test_team_clutches_reads_counts(tmp_path):
+    from valtrack.queries import team_clutches
+    from valtrack.stats import clutch_stats
+
+    conn = _fresh_conn(tmp_path)
+    _seed_detail_match(conn)
+    out = clutch_stats(team_clutches(conn, 1), "Alpha")
+    assert out["won"] == 4 and out["total"] == 6   # two players, 2 won / 1 lost each
+    conn.close()
+
+
+def test_team_map_opponent_rank_averages_opponent_rank(tmp_path):
+    from valtrack.queries import team_map_opponent_rank
+
+    conn = _fresh_conn(tmp_path)
+    _seed_detail_match(conn)
+    rows = {r["map_name"]: r for r in team_map_opponent_rank(conn, 1)}
+    # The one Lotus map was against Beta, whose stored regional rank is 9.
+    assert rows["Lotus"]["avg_rank"] == 9 and rows["Lotus"]["ranked"] == 1
+    conn.close()
+
+
+def test_team_economy_empty_without_economy_rows(tmp_path):
+    from valtrack.queries import team_economy
+
+    conn = _fresh_conn(tmp_path)
+    _seed_detail_match(conn)
+    # The economy table stays empty (broken upstream), so the read is empty too.
+    assert team_economy(conn, 1) == []
+    conn.close()
+
+
 def test_record_respects_window(tmp_path):
     from valtrack.queries import team_record
 

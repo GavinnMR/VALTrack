@@ -87,3 +87,31 @@ def test_matchup_log_delete(tmp_path):
     remaining = journal.list_log_entries(conn)
     assert [e["note"] for e in remaining] == ["first"]
     conn.close()
+
+
+def test_favorites_add_list_and_remove_order_independent(tmp_path):
+    conn = _conn(tmp_path)
+    assert journal.is_favorite(conn, 100, 200) is False
+    journal.add_favorite(conn, 100, "Alpha", 200, "Beta")
+    # The same pair the other way round is the same favorite (order independent).
+    assert journal.is_favorite(conn, 200, 100) is True
+    journal.add_favorite(conn, 200, "Beta", 100, "Alpha")  # idempotent
+    assert len(journal.list_favorites(conn)) == 1
+    journal.remove_favorite(conn, 100, 200)
+    assert journal.is_favorite(conn, 100, 200) is False
+    conn.close()
+
+
+def test_upcoming_tag_round_trips_and_clears(tmp_path):
+    conn = _conn(tmp_path)
+    assert journal.get_upcoming(conn, 1, 2) is None
+    journal.save_upcoming(conn, 1, 2, "2026-07-01", "Masters Toronto", True)
+    up = journal.get_upcoming(conn, 2, 1)  # order independent
+    assert up["match_date"] == "2026-07-01"
+    assert up["event_name"] == "Masters Toronto" and up["is_lan"] is True
+    # Upsert overwrites rather than duplicating.
+    journal.save_upcoming(conn, 1, 2, "2026-07-02", "Regional", False)
+    assert journal.get_upcoming(conn, 1, 2)["is_lan"] is False
+    journal.clear_upcoming(conn, 1, 2)
+    assert journal.get_upcoming(conn, 1, 2) is None
+    conn.close()

@@ -135,6 +135,39 @@ def test_app_boots_and_toggles_without_exception(tmp_path, monkeypatch):
     assert not at.exception
 
 
+def test_app_save_and_remove_favorite(tmp_path, monkeypatch):
+    path = tmp_path / "app.db"
+    _seed(path)
+    monkeypatch.setattr(db, "DB_PATH", path)
+    real_connect = db.connect
+    monkeypatch.setattr(db, "connect", lambda *a, **k: real_connect(path))
+
+    at = AppTest.from_file("app.py").run(timeout=120)
+    # The save star exists for an unsaved pair; clicking it saves the matchup.
+    save = [b for b in at.button if b.label == "☆ Save"]
+    assert save
+    save[0].click().run(timeout=120)
+    assert not at.exception
+    # Now the pair reads as saved.
+    assert [b for b in at.button if b.label == "★ Saved"]
+
+
+def test_app_palette_and_reset_controls(tmp_path, monkeypatch):
+    path = tmp_path / "app.db"
+    _seed(path)
+    monkeypatch.setattr(db, "DB_PATH", path)
+    real_connect = db.connect
+    monkeypatch.setattr(db, "connect", lambda *a, **k: real_connect(path))
+
+    at = AppTest.from_file("app.py").run(timeout=120)
+    _by_key(at.selectbox, "palette").set_value(
+        "Colorblind-safe (blue/orange)").run(timeout=120)
+    assert not at.exception
+    # Reset returns to the default view without error.
+    _by_label(at.button, "Reset view").click().run(timeout=120)
+    assert not at.exception
+
+
 def test_app_matchup_log_add_and_resolve(tmp_path, monkeypatch):
     path = tmp_path / "app.db"
     _seed(path)

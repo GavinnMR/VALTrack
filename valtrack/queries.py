@@ -325,6 +325,122 @@ def team_player_stats(conn, team_id, window=None):
     ).fetchall()
 
 
+def team_compositions(conn, team_id, window=None):
+    """Per-map player agent rows for this team, with the map winner, windowed.
+
+    One row per player per map the team played: match_id, map_name, team_name,
+    agent, and the map's winner_name (joined from map_results). Feeds
+    stats.map_compositions, which folds the per-player agents back into the
+    five-agent composition the team fielded on each map. The date filter is on
+    the parent match. Returns [] when the team has no stored detail.
+    """
+    name = _team_name(conn, team_id)
+    if name is None:
+        return []
+    window = window or DateWindow.all_time()
+    wclause, wparams = window.clause("m.date")
+    return conn.execute(
+        f"""
+        SELECT mps.match_id, mps.map_name, mps.team_name, mps.agent,
+               mr.winner_name
+        FROM map_player_stats mps
+        JOIN matches m ON m.match_id = mps.match_id
+        LEFT JOIN map_results mr
+          ON mr.match_id = mps.match_id AND mr.map_name = mps.map_name
+        WHERE mps.team_name = ?
+          AND {wclause}
+        """,
+        [name, *wparams],
+    ).fetchall()
+
+
+def team_clutches(conn, team_id, window=None):
+    """Per-player per-map clutch counts for this team, windowed.
+
+    One row per player per map: player_name, team_name, clutch_won, clutch_lost.
+    Feeds stats.clutch_stats. The columns are null until the scraper extension
+    that fills them lands, so this returns rows with null counts (treated as zero
+    by the aggregation) until then. Returns [] when the team has no stored detail.
+    """
+    name = _team_name(conn, team_id)
+    if name is None:
+        return []
+    window = window or DateWindow.all_time()
+    wclause, wparams = window.clause("m.date")
+    return conn.execute(
+        f"""
+        SELECT mps.player_name, mps.team_name, mps.clutch_won, mps.clutch_lost
+        FROM map_player_stats mps
+        JOIN matches m ON m.match_id = mps.match_id
+        WHERE mps.team_name = ?
+          AND {wclause}
+        """,
+        [name, *wparams],
+    ).fetchall()
+
+
+def team_economy(conn, team_id, window=None):
+    """Per-round economy rows for this team's maps, windowed.
+
+    One row per stored economy entry: team_name, buy_type, outcome. Feeds
+    stats.economy_conversion. The economy table is empty until the upstream
+    per-map economy scrape is fixed, so this returns [] on real data today; the
+    query and aggregation are in place so the view fills when the data does.
+    """
+    name = _team_name(conn, team_id)
+    if name is None:
+        return []
+    window = window or DateWindow.all_time()
+    wclause, wparams = window.clause("m.date")
+    return conn.execute(
+        f"""
+        SELECT e.team_name, e.buy_type, e.outcome
+        FROM economy e
+        JOIN matches m ON m.match_id = e.match_id
+        WHERE e.team_name = ?
+          AND {wclause}
+        """,
+        [name, *wparams],
+    ).fetchall()
+
+
+def team_map_opponent_rank(conn, team_id, window=None):
+    """Average opponent regional rank per map this team played, windowed.
+
+    Tells the user the quality of opposition behind a per-map figure, so a 70%
+    on Bind farmed against weak teams reads differently from one against tier
+    one (item 5). One row per map: map_name, avg_rank (average opponent regional
+    rank, None when no opponent there had a stored rank), ranked (how many of the
+    maps had a ranked opponent), and maps (total). The rank is VLR's current
+    snapshot applied to past maps, so it is a rough signal, like the
+    strength-of-schedule figure. The team can be in either match slot, so the
+    opponent slot is resolved by id. Returns [] when the team has no detail.
+    """
+    name = _team_name(conn, team_id)
+    if name is None:
+        return []
+    window = window or DateWindow.all_time()
+    wclause, wparams = window.clause("m.date")
+    rows = conn.execute(
+        f"""
+        SELECT mr.map_name,
+               AVG(t.regional_rank) AS avg_rank,
+               COUNT(t.regional_rank) AS ranked,
+               COUNT(*) AS maps
+        FROM map_results mr
+        JOIN matches m ON m.match_id = mr.match_id
+        LEFT JOIN teams t ON t.id = (
+            CASE WHEN m.team1_id = ? THEN m.team2_id ELSE m.team1_id END
+        )
+        WHERE (mr.team1_name = ? OR mr.team2_name = ?)
+          AND {wclause}
+        GROUP BY mr.map_name
+        """,
+        [team_id, name, name, *wparams],
+    ).fetchall()
+    return rows
+
+
 def player_appearances(conn, team_id, window=None):
     """When each player appeared for this team, from stored per-map detail.
 

@@ -23,10 +23,13 @@ def connect(db_path=DB_PATH):
 _ADDED_COLUMNS = [
     ("matches", "map_vetos_raw", "TEXT"),
     ("matches", "details_fetched_at", "TEXT"),
+    ("matches", "match_format", "TEXT"),
     ("map_player_stats", "first_kills_atk", "INTEGER"),
     ("map_player_stats", "first_kills_def", "INTEGER"),
     ("map_player_stats", "first_deaths_atk", "INTEGER"),
     ("map_player_stats", "first_deaths_def", "INTEGER"),
+    ("map_player_stats", "clutch_won", "INTEGER"),
+    ("map_player_stats", "clutch_lost", "INTEGER"),
     ("matchup_log", "outcome_side", "TEXT"),
 ]
 
@@ -88,6 +91,21 @@ CREATE TABLE IF NOT EXISTS matchup_log (
     outcome_side TEXT,
     created_at   TEXT,
     resolved_at  TEXT
+);
+CREATE TABLE IF NOT EXISTS matchup_favorites (
+    pair_key    TEXT PRIMARY KEY,
+    team_a_id   INTEGER,
+    team_a_name TEXT,
+    team_b_id   INTEGER,
+    team_b_name TEXT,
+    created_at  TEXT
+);
+CREATE TABLE IF NOT EXISTS matchup_upcoming (
+    pair_key    TEXT PRIMARY KEY,
+    match_date  TEXT,
+    event_name  TEXT,
+    is_lan      INTEGER,
+    updated_at  TEXT
 );
 """
 

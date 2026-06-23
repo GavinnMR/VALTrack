@@ -85,6 +85,7 @@ CREATE TABLE IF NOT EXISTS matches (
     winner_name TEXT,
     map_vetos_raw      TEXT,    -- the raw veto string from the per-match pass
     details_fetched_at TEXT,    -- set once the expensive per-match detail is stored
+    match_format       TEXT,    -- bo1, bo3, bo5; inferred from the maps played
     fetched_at  TEXT
 );
 
@@ -161,6 +162,11 @@ CREATE TABLE IF NOT EXISTS map_player_stats (
     first_kills_def  INTEGER,
     first_deaths_atk INTEGER,
     first_deaths_def INTEGER,
+    -- Clutch (1vX) situations the player won and lost on the map. These need a
+    -- scraper extension to populate (VLR exposes clutches on the match page), so
+    -- they stay null until that lands; the clutch view reads them when present.
+    clutch_won   INTEGER,
+    clutch_lost  INTEGER,
     fetched_at   TEXT,
     FOREIGN KEY (match_id) REFERENCES matches (match_id)
 );
@@ -238,4 +244,26 @@ CREATE TABLE IF NOT EXISTS matchup_log (
     outcome_side TEXT,          -- structured winner, "a" or "b", null until resolved
     created_at   TEXT,
     resolved_at  TEXT
+);
+
+-- Saved (favorite) matchups for one-click reload, keyed by the order-independent
+-- pair key like the notes table.
+CREATE TABLE IF NOT EXISTS matchup_favorites (
+    pair_key    TEXT PRIMARY KEY,
+    team_a_id   INTEGER,
+    team_a_name TEXT,
+    team_b_id   INTEGER,
+    team_b_name TEXT,
+    created_at  TEXT
+);
+
+-- An optional tag for the upcoming real match between a pair: its date, event,
+-- and whether it is LAN, so the context panel can compare the data against the
+-- actual match conditions. Keyed by the order-independent pair key.
+CREATE TABLE IF NOT EXISTS matchup_upcoming (
+    pair_key    TEXT PRIMARY KEY,
+    match_date  TEXT,
+    event_name  TEXT,
+    is_lan      INTEGER,
+    updated_at  TEXT
 );

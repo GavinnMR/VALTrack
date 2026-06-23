@@ -105,3 +105,95 @@ def delete_log_entry(conn, entry_id):
     """Remove a log entry entirely, for a mistaken or unwanted call."""
     conn.execute("DELETE FROM matchup_log WHERE id = ?", (entry_id,))
     conn.commit()
+
+
+# --- saved (favorite) matchups (item 18) ------------------------------------
+
+def is_favorite(conn, team_a_id, team_b_id):
+    """True when this team pair has been saved as a favorite."""
+    row = conn.execute(
+        "SELECT 1 FROM matchup_favorites WHERE pair_key = ?",
+        (pair_key(team_a_id, team_b_id),),
+    ).fetchone()
+    return row is not None
+
+
+def add_favorite(conn, team_a_id, team_a_name, team_b_id, team_b_name):
+    """Save a team pair as a favorite for one-click reload. Idempotent."""
+    conn.execute(
+        """
+        INSERT INTO matchup_favorites (
+            pair_key, team_a_id, team_a_name, team_b_id, team_b_name, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(pair_key) DO NOTHING
+        """,
+        (pair_key(team_a_id, team_b_id), team_a_id, team_a_name,
+         team_b_id, team_b_name, _now()),
+    )
+    conn.commit()
+
+
+def remove_favorite(conn, team_a_id, team_b_id):
+    """Remove a saved matchup."""
+    conn.execute(
+        "DELETE FROM matchup_favorites WHERE pair_key = ?",
+        (pair_key(team_a_id, team_b_id),),
+    )
+    conn.commit()
+
+
+def list_favorites(conn):
+    """All saved matchups, newest first."""
+    return conn.execute(
+        "SELECT * FROM matchup_favorites ORDER BY created_at DESC, pair_key"
+    ).fetchall()
+
+
+# --- upcoming-match tag (item 26) -------------------------------------------
+
+def get_upcoming(conn, team_a_id, team_b_id):
+    """The saved upcoming-match tag for a pair, or None when there is none.
+
+    Returns a dict with match_date, event_name, and is_lan (bool), so the context
+    panel can compare the data against the real match conditions.
+    """
+    row = conn.execute(
+        "SELECT match_date, event_name, is_lan FROM matchup_upcoming "
+        "WHERE pair_key = ?",
+        (pair_key(team_a_id, team_b_id),),
+    ).fetchone()
+    if not row:
+        return None
+    return {
+        "match_date": row["match_date"],
+        "event_name": row["event_name"],
+        "is_lan": bool(row["is_lan"]),
+    }
+
+
+def save_upcoming(conn, team_a_id, team_b_id, match_date, event_name, is_lan):
+    """Upsert the upcoming-match tag for a pair."""
+    conn.execute(
+        """
+        INSERT INTO matchup_upcoming (
+            pair_key, match_date, event_name, is_lan, updated_at
+        ) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(pair_key) DO UPDATE SET
+            match_date = excluded.match_date,
+            event_name = excluded.event_name,
+            is_lan = excluded.is_lan,
+            updated_at = excluded.updated_at
+        """,
+        (pair_key(team_a_id, team_b_id), match_date, event_name,
+         1 if is_lan else 0, _now()),
+    )
+    conn.commit()
+
+
+def clear_upcoming(conn, team_a_id, team_b_id):
+    """Remove the upcoming-match tag for a pair."""
+    conn.execute(
+        "DELETE FROM matchup_upcoming WHERE pair_key = ?",
+        (pair_key(team_a_id, team_b_id),),
+    )
+    conn.commit()

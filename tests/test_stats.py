@@ -6,13 +6,20 @@ survive VLR's unreliable staff flag and its occasionally mangled role text.
 """
 from valtrack.stats import (
     align_rosters,
+    canonical_player_name,
     classify_roster,
+    clutch_stats,
     current_five_names,
+    economy_conversion,
     form_and_streak,
+    infer_match_format,
     is_small_sample,
     keep_players,
+    map_compositions,
+    map_duel_board,
     map_pool_overlap,
     map_winrates,
+    merge_player_aliases,
     opening_duels,
     per_map_splits,
     pistol_winrate,
@@ -20,8 +27,10 @@ from valtrack.stats import (
     player_map_aggregates,
     pressure_stats,
     primary_role,
+    rank_metric_gaps,
     side_winrates,
     team_rating,
+    wilson_interval,
 )
 
 
@@ -800,3 +809,164 @@ def test_map_pool_overlap_defaults_to_union_sorted():
     assert [row["map"] for row in out] == ["Ascent", "Bind"]
     # Each is insufficient since only one team has each map.
     assert all(row["label"] == "insufficient" for row in out)
+
+
+# --- Wilson confidence interval (item 4) ------------------------------------
+
+def test_wilson_interval_none_without_observations():
+    assert wilson_interval(0, 0) is None
+
+
+def test_wilson_interval_brackets_the_rate_and_stays_in_bounds():
+    low, high = wilson_interval(6, 10)
+    assert 0.0 <= low < 0.6 < high <= 1.0
+
+
+def test_wilson_interval_tightens_with_more_data():
+    thin = wilson_interval(60, 100)
+    thick = wilson_interval(600, 1000)
+    # Same 60% rate, but the larger sample gives a narrower band.
+    assert (thick[1] - thick[0]) < (thin[1] - thin[0])
+
+
+def test_wilson_interval_handles_the_extremes_without_running_past_bounds():
+    low, high = wilson_interval(10, 10)
+    assert high <= 1.0 and low < 1.0   # 100% still has a lower bound below 1
+    low0, high0 = wilson_interval(0, 10)
+    assert low0 >= 0.0 and high0 > 0.0
+
+
+# --- agent compositions per map (item 3) ------------------------------------
+
+def _comp_row(match_id, map_name, team, agent, winner):
+    return {"match_id": match_id, "map_name": map_name, "team_name": team,
+            "agent": agent, "winner_name": winner}
+
+
+def test_map_compositions_tallies_and_orders_by_play_count():
+    team = "PRX"
+    rows = []
+    # Two maps of the same comp on Lotus, one won one lost.
+    for mid, winner in ((1, "PRX"), (2, "EDG")):
+        for ag in ("Jett", "Omen", "Sova", "Killjoy", "Skye"):
+            rows.append(_comp_row(mid, "Lotus", team, ag, winner))
+    # One map of a different comp on Lotus, won.
+    for ag in ("Raze", "Omen", "Sova", "Killjoy", "Skye"):
+        rows.append(_comp_row(3, "Lotus", team, ag, "PRX"))
+    # An opponent row that must be ignored.
+    rows.append(_comp_row(1, "Lotus", "EDG", "Yoru", "PRX"))
+
+    out = map_compositions(rows, team)
+    lotus = out["Lotus"]
+    assert lotus[0]["played"] == 2          # the Jett comp leads on play count
+    assert lotus[0]["won"] == 1
+    assert lotus[0]["winrate"] == 0.5
+    assert "Jett" in lotus[0]["agents"] and "Yoru" not in lotus[0]["agents"]
+    assert lotus[1]["played"] == 1 and lotus[1]["winrate"] == 1.0
+
+
+# --- map duel board cross-side framing (item 22) ----------------------------
+
+def test_map_duel_board_pairs_attack_against_defense():
+    a = {"Lotus": {"map_winrate": 0.6, "atk_winrate": 0.7, "def_winrate": 0.5,
+                   "rounds_total": 40}}
+    b = {"Lotus": {"map_winrate": 0.55, "atk_winrate": 0.61, "def_winrate": 0.55,
+                   "rounds_total": 30}}
+    row = map_duel_board(a, b, ["Lotus"])[0]
+    # The cross-side duel: A attacking lines up against B defending, and mirror.
+    assert (row["a_atk"], row["b_def"]) == (0.7, 0.55)
+    assert (row["b_atk"], row["a_def"]) == (0.61, 0.5)
+    assert row["a_rounds"] == 40 and row["b_rounds"] == 30
+
+
+def test_map_duel_board_missing_side_is_none():
+    a = {"Lotus": {"map_winrate": 0.6, "atk_winrate": 0.7, "def_winrate": 0.5,
+                   "rounds_total": 40}}
+    row = map_duel_board(a, {}, ["Lotus"])[0]
+    assert row["b_atk"] is None and row["b_map"] is None and row["b_rounds"] == 0
+
+
+# --- gap ranking (item 24) --------------------------------------------------
+
+def test_rank_metric_gaps_orders_by_absolute_gap_and_tags_leader():
+    metrics = [
+        {"metric": "Win %", "a": 60.0, "b": 55.0},     # gap 5, a leads
+        {"metric": "Pistol %", "a": 40.0, "b": 70.0},  # gap -30, b leads
+        {"metric": "Rating", "a": 1.1, "b": 1.1},      # tie
+        {"metric": "Opening %", "a": None, "b": 50.0}, # missing, sorts last
+    ]
+    out = rank_metric_gaps(metrics)
+    assert [r["metric"] for r in out] == [
+        "Pistol %", "Win %", "Rating", "Opening %"]
+    assert out[0]["leader"] == "b" and out[0]["gap"] == -30.0
+    assert out[1]["leader"] == "a"
+    assert out[2]["leader"] is None          # a tie has no leader
+    assert out[3]["gap"] is None             # a missing side has no gap
+
+
+# --- economy conversion (item 1) --------------------------------------------
+
+def test_economy_conversion_win_rate_per_buy_type():
+    rows = [
+        {"team_name": "PRX", "buy_type": "eco", "outcome": "won"},
+        {"team_name": "PRX", "buy_type": "eco", "outcome": "lost"},
+        {"team_name": "PRX", "buy_type": "full", "outcome": "won"},
+        {"team_name": "EDG", "buy_type": "eco", "outcome": "won"},  # ignored
+    ]
+    out = economy_conversion(rows, "PRX")
+    assert out["eco"] == {"won": 1, "total": 2, "winrate": 0.5}
+    assert out["full"]["winrate"] == 1.0
+    assert "EDG" not in str(out)
+
+
+# --- clutch stats (item 2) --------------------------------------------------
+
+def test_clutch_stats_team_and_per_player():
+    rows = [
+        {"player_name": "f0rsakeN", "team_name": "PRX",
+         "clutch_won": 2, "clutch_lost": 1},
+        {"player_name": "f0rsakeN", "team_name": "PRX",
+         "clutch_won": 1, "clutch_lost": 0},
+        {"player_name": "something", "team_name": "PRX",
+         "clutch_won": 0, "clutch_lost": None},
+        {"player_name": "x", "team_name": "EDG",
+         "clutch_won": 5, "clutch_lost": 0},  # ignored
+    ]
+    out = clutch_stats(rows, "PRX")
+    assert out["won"] == 3 and out["total"] == 4
+    assert out["players"][0]["player_name"] == "f0rsakeN"
+    assert out["players"][0]["winrate"] == 0.75
+
+
+# --- player-name dedup (item 7) ---------------------------------------------
+
+def test_infer_match_format_from_series_score():
+    assert infer_match_format(3, 1) == "Bo5"   # first to 3
+    assert infer_match_format(0, 3) == "Bo5"
+    assert infer_match_format(2, 0) == "Bo3"   # first to 2
+    assert infer_match_format(1, 0) == "Bo1"
+    assert infer_match_format(None, 2) is None
+    assert infer_match_format(0, 0) is None
+
+
+def test_canonical_player_name_strips_trailing_digits_when_safe():
+    assert canonical_player_name("Moonlight") == "moonlight"
+    assert canonical_player_name("MOONLIGHT1") == "moonlight"
+    # Too short after stripping, so a numeric-ish short handle is left alone.
+    assert canonical_player_name("s0m") == "s0m"
+
+
+def test_merge_player_aliases_unifies_variants_to_one_display():
+    rows = [
+        {"player_name": "Moonlight", "x": 1},
+        {"player_name": "Moonlight", "x": 2},
+        {"player_name": "MOONLIGHT1", "x": 3},
+        {"player_name": None, "x": 4},
+    ]
+    merged = merge_player_aliases(rows)
+    names = [r["player_name"] for r in merged]
+    # All three variants collapse to the most frequent spelling, none lost.
+    assert names[:3] == ["Moonlight", "Moonlight", "Moonlight"]
+    assert names[3] is None
+    # And aggregating now sees one player, not two.
+    assert len({canonical_player_name(n) for n in names if n}) == 1

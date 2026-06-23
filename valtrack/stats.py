@@ -5,6 +5,9 @@ access, so they are cheap to unit test against known inputs. The later
 must-aggregate steps (side splits, pistol, opening duels) can add their pure
 logic here too.
 """
+import math
+import re
+
 from valtrack.agents import ROLE_ORDER, agent_role
 from valtrack.cleaning import parse_float
 
@@ -708,6 +711,296 @@ def primary_role(agent_pool):
     if not tally:
         return "unknown"
     return min(tally, key=lambda role: (-tally[role], ROLE_ORDER.index(role)))
+
+
+def wilson_interval(won, total, z=1.96):
+    """A Wilson score confidence interval for a win rate, as (low, high) 0..1.
+
+    The small-sample flag elsewhere is binary: a rate is either trusted or
+    marked thin. This says how thin. The Wilson interval is the standard
+    confidence band for a proportion and behaves well on small and lopsided
+    samples (it never runs past 0 or 1 and is not silly at 0 or 100 percent),
+    which is exactly the regime a thin VCT sample lives in. A 60 percent over 10
+    rounds comes back as a wide band, a 60 percent over 200 as a tight one, so
+    the user sees how reliable the number actually is.
+
+    Returns None when there is nothing to judge (no observations), which is
+    honest rather than a fabricated band. z defaults to 1.96 (about 95 percent).
+    This is a spread around a single rate, never a comparison or a verdict.
+    """
+    if not total:
+        return None
+    phat = won / total
+    denom = 1 + z * z / total
+    centre = (phat + z * z / (2 * total)) / denom
+    margin = z * math.sqrt((phat * (1 - phat) + z * z / (4 * total)) / total) / denom
+    return (max(0.0, centre - margin), min(1.0, centre + margin))
+
+
+def infer_match_format(team_score, opp_score):
+    """Infer the series format (Bo1, Bo3, Bo5) from the series score.
+
+    The format is not stored, but the maps needed to clinch fix it: a Bo5 is won
+    at three maps, a Bo3 at two, a Bo1 at one. So the higher series score names
+    the format without needing the map count or a format assumption. Returns None
+    when either score is missing. Used to annotate a meeting so a 2-0 (Bo3) reads
+    differently from a 3-0 (Bo5).
+    """
+    if team_score is None or opp_score is None:
+        return None
+    top = max(team_score, opp_score)
+    if top >= 3:
+        return "Bo5"
+    if top == 2:
+        return "Bo3"
+    if top == 1:
+        return "Bo1"
+    return None
+
+
+def map_compositions(rows, team_name):
+    """The agent compositions one team runs per map, with how each one does.
+
+    Crosses the per-map player stats with the map result to recover, for each
+    map a team played, the five-agent composition it fielded and the record on
+    it. The data model lists agent compositions per map but the app only shows
+    per-player agent pools, so this assembles the team-level comp the veto read
+    actually wants.
+
+    Each row needs match_id, map_name, team_name, agent, and winner_name (the map
+    winner). Rows for the other team are ignored. A composition is the sorted
+    tuple of the agents that team fielded in one map instance; identical comps
+    across maps are tallied together.
+
+    Returns a dict keyed by map name, each value a list of
+    {agents, played, won, winrate} sorted by how often the comp was played then
+    its win rate. winrate is wins over times played (None when never decided).
+    This is descriptive: it shows what a team brings and how it fared, never a
+    pick recommendation.
+    """
+    games = {}
+    for row in rows:
+        if row["team_name"] != team_name:
+            continue
+        name = row["map_name"]
+        if not name:
+            continue
+        key = (row["match_id"], name)
+        g = games.setdefault(
+            key, {"map": name, "agents": [], "winner": row["winner_name"]}
+        )
+        if row["agent"]:
+            g["agents"].append(row["agent"])
+
+    by_map = {}
+    for g in games.values():
+        comp = tuple(sorted(g["agents"]))
+        tally = by_map.setdefault(g["map"], {})
+        agg = tally.setdefault(comp, {"played": 0, "won": 0})
+        agg["played"] += 1
+        if g["winner"] == team_name:
+            agg["won"] += 1
+
+    out = {}
+    for name, comps in by_map.items():
+        rows_out = [
+            {"agents": list(comp), "played": agg["played"], "won": agg["won"],
+             "winrate": _rate(agg["won"], agg["played"])}
+            for comp, agg in comps.items()
+        ]
+        rows_out.sort(key=lambda c: (-c["played"], -(c["winrate"] or 0)))
+        out[name] = rows_out
+    return out
+
+
+def map_duel_board(a_splits, b_splits, pool=None):
+    """Frame each map as the cross-side duel between two teams.
+
+    Valorant maps are sided, so the read a predictor wants on a given map is not
+    each team's attack and defense in isolation but the duel: team A attacking
+    against team B defending, and the mirror. This lines those up.
+
+    `a_splits` and `b_splits` are per-map dicts keyed by map name (as
+    per_map_splits returns, reshaped by map), each carrying map_winrate,
+    atk_winrate, def_winrate, and rounds_total. `pool` restricts and orders the
+    maps (the likely-played pool); when omitted, every map either team has is
+    used, sorted by name.
+
+    Each row carries both teams' map win rate, both attack rates, both defense
+    rates, and the round samples, so the view can pair A attack with B defense
+    and B attack with A defense. A missing side is None, which the view shows as
+    blank rather than a fabricated rate. This stays per-map and per-side; it
+    never collapses to a "who wins the map" call.
+    """
+    names = pool if pool is not None else sorted(set(a_splits) | set(b_splits))
+    out = []
+    for name in names:
+        a = a_splits.get(name)
+        b = b_splits.get(name)
+        out.append({
+            "map": name,
+            "a_map": a["map_winrate"] if a else None,
+            "b_map": b["map_winrate"] if b else None,
+            "a_atk": a["atk_winrate"] if a else None,
+            "a_def": a["def_winrate"] if a else None,
+            "b_atk": b["atk_winrate"] if b else None,
+            "b_def": b["def_winrate"] if b else None,
+            "a_rounds": (a["rounds_total"] if a else 0),
+            "b_rounds": (b["rounds_total"] if b else 0),
+        })
+    return out
+
+
+def rank_metric_gaps(metrics):
+    """Order comparable metrics by the size of the gap between two teams.
+
+    `metrics` is a list of dicts each with at least "metric", "a", and "b" (the
+    two teams' values, already on a common scale, or None). Each row gains a
+    signed gap (a minus b), its absolute size, and a "leader" tag ("a", "b", or
+    None on a tie or a missing side). Rows are sorted by absolute gap descending,
+    with rows missing a value last. Extra keys on the input (a suffix, decimals)
+    pass through untouched for the view.
+
+    This surfaces where two teams differ most and where they are nearly even,
+    which is the read a predictor assembles by hand. The hard line: this sorts
+    per-statistic differences by size and tags which side leads each row. It does
+    not count how many a team leads or produce any overall winner, which would be
+    the composite the charter forbids.
+    """
+    out = []
+    for m in metrics:
+        a, b = m.get("a"), m.get("b")
+        gap = None if a is None or b is None else a - b
+        leader = None
+        if gap is not None and gap != 0:
+            leader = "a" if gap > 0 else "b"
+        out.append({
+            **m,
+            "gap": gap,
+            "abs_gap": abs(gap) if gap is not None else None,
+            "leader": leader,
+        })
+    out.sort(key=lambda r: (r["abs_gap"] is None, -(r["abs_gap"] or 0)))
+    return out
+
+
+def economy_conversion(rows, team_name):
+    """Win rate by buy type for one team, from stored round economy.
+
+    Each row needs team_name, buy_type ("eco", "semi", "full", "bonus"), and
+    outcome ("won" / "lost"). Rows for the other team are ignored. Returns a dict
+    keyed by buy type, each value {won, total, winrate}. The eco bucket's win
+    rate is the eco conversion (how often a team wins a round it could not fully
+    buy); the figures are reported per buy type and never folded into one economy
+    rating.
+
+    The economy table is empty until the upstream per-map economy scrape is
+    fixed (it currently returns the first map's table for every map), so this
+    returns {} on real data today. The logic is in place and tested so it lights
+    up the moment the data does.
+    """
+    buckets = {}
+    for row in rows:
+        if row["team_name"] != team_name:
+            continue
+        bt = row["buy_type"]
+        if not bt:
+            continue
+        agg = buckets.setdefault(bt, {"won": 0, "total": 0})
+        agg["total"] += 1
+        if row["outcome"] == "won":
+            agg["won"] += 1
+    return {
+        bt: {"won": agg["won"], "total": agg["total"],
+             "winrate": _rate(agg["won"], agg["total"])}
+        for bt, agg in buckets.items()
+    }
+
+
+def clutch_stats(rows, team_name):
+    """Team and per-player clutch (1vX) record from stored clutch counts.
+
+    Each row needs player_name, team_name, and per-map clutch_won / clutch_lost
+    counts (1vX situations the player won or lost). Rows for the other team are
+    ignored; null counts are treated as zero. Returns the team totals
+    {won, total, winrate} plus a "players" list of the same shape per player,
+    sorted by clutch situations descending then name.
+
+    Reported as counts and a rate, never a "clutch rating". The clutch columns
+    depend on a scraper extension, so this returns zeros until that lands; the
+    aggregation is in place and tested so the view fills in when the data does.
+    """
+    team = {"won": 0, "total": 0}
+    per = {}
+    for row in rows:
+        if row["team_name"] != team_name:
+            continue
+        won = row["clutch_won"] or 0
+        lost = row["clutch_lost"] or 0
+        agg = per.setdefault(row["player_name"], {"won": 0, "total": 0})
+        agg["won"] += won
+        agg["total"] += won + lost
+        team["won"] += won
+        team["total"] += won + lost
+    players = [
+        {"player_name": name, "won": a["won"], "total": a["total"],
+         "winrate": _rate(a["won"], a["total"])}
+        for name, a in per.items()
+    ]
+    players.sort(key=lambda p: (-p["total"], p["player_name"]))
+    return {
+        "won": team["won"], "total": team["total"],
+        "winrate": _rate(team["won"], team["total"]), "players": players,
+    }
+
+
+def canonical_player_name(name):
+    """A canonical key for a player name, to merge duplicate spellings.
+
+    The detail tables sometimes carry the same player under variant names (for
+    example "Moonlight" and "MOONLIGHT1"), which splits one player's sample into
+    two lines and skews the player views. This casefolds, trims, and strips a
+    trailing run of digits, but only when at least three characters remain, so a
+    genuinely short or numeric handle is left alone rather than over-merged.
+    Conservative on purpose: it is better to miss a merge than to fuse two real
+    players.
+    """
+    if not name:
+        return ""
+    base = name.strip().casefold()
+    stripped = re.sub(r"\d+$", "", base)
+    return stripped if len(stripped) >= 3 else base
+
+
+def merge_player_aliases(rows):
+    """Rewrite per-player rows so variant spellings of one player agree.
+
+    Groups the rows by canonical_player_name and rewrites each row's player_name
+    to one display spelling per group (the most frequently seen original, ties
+    broken by name), so the downstream aggregations treat the variants as one
+    player. Rows with no player name pass through untouched. Returns new dicts and
+    does not mutate the input, so a sqlite Row list is safe to pass.
+    """
+    counts = {}
+    for r in rows:
+        nm = r["player_name"]
+        if not nm:
+            continue
+        key = canonical_player_name(nm)
+        counts.setdefault(key, {})
+        counts[key][nm] = counts[key].get(nm, 0) + 1
+    display = {
+        key: max(seen, key=lambda n: (seen[n], n))
+        for key, seen in counts.items()
+    }
+    out = []
+    for r in rows:
+        d = dict(r)
+        nm = d["player_name"]
+        if nm:
+            d["player_name"] = display[canonical_player_name(nm)]
+        out.append(d)
+    return out
 
 
 def align_rosters(team_a_players, team_b_players):
