@@ -1,0 +1,210 @@
+diff --git a/api/scrapers/match_detail.py b/api/scrapers/match_detail.py
+index d21082f..4aa9e49 100644
+--- a/api/scrapers/match_detail.py
++++ b/api/scrapers/match_detail.py
+@@ -228,9 +228,26 @@ def _parse_player_row(cells: list) -> dict:
+             return both.text(strip=True)
+         return cell.text(strip=True)
+ 
++    def side_val(cell, side_class: str) -> str:
++        """Extract one side's value from a stat cell.
++
++        VLR renders each stat cell with three spans: .side.mod-both (combined),
++        .side.mod-t (attack/T side), and .side.mod-ct (defense/CT side). The
++        overview table defaults to the combined value, but the per-side spans are
++        in the DOM too. Returns "" when the side span is absent (older pages or a
++        fixture that only carries the combined value).
++        """
++        if not cell:
++            return ""
++        span = cell.css_first(f".side.{side_class}")
++        return span.text(strip=True) if span else ""
++
+     def safe_val(idx: int) -> str:
+         return cell_val(cells[idx]) if idx < len(cells) else ""
+ 
++    def safe_side_val(idx: int, side_class: str) -> str:
++        return side_val(cells[idx], side_class) if idx < len(cells) else ""
++
+     # Player name — [0] mod-player
+     player_name = ""
+     if cells:
+@@ -263,6 +280,13 @@ def _parse_player_row(cells: list) -> dict:
+         "fk": safe_val(11),
+         "fd": safe_val(12),
+         "fk_diff": safe_val(13),
++        # Per-side first kills and deaths, T = attack, CT = defense. The overview
++        # table shows the combined value by default; these pull the side spans so
++        # an attack/defense opening-duel split can be computed downstream.
++        "fk_t": safe_side_val(11, "mod-t"),
++        "fk_ct": safe_side_val(11, "mod-ct"),
++        "fd_t": safe_side_val(12, "mod-t"),
++        "fd_ct": safe_side_val(12, "mod-ct"),
+     }
+ 
+ 
+@@ -385,6 +409,7 @@ def _parse_rounds(game_elem) -> list[dict]:
+             # Determine winner from whichever sq has mod-win
+             winner = ""
+             winning_side = ""
++            win_type = ""
+             for idx, sq in enumerate(sqs):
+                 sq_cls = sq.attributes.get("class", "")
+                 if "mod-win" in sq_cls:
+@@ -393,12 +418,23 @@ def _parse_rounds(game_elem) -> list[dict]:
+                         winning_side = "ct"
+                     elif "mod-t" in sq_cls:
+                         winning_side = "t"
++                    # VALTrack clone patch: the win-condition icon lives in the
++                    # winning square as /img/vlr/game/round/<type>.webp, where
++                    # type is elim, defuse, time, or boom. Re-apply after a
++                    # re-clone (see the VALTrack README clone-patches note).
++                    icon = sq.css_first("img")
++                    if icon:
++                        src = icon.attributes.get("src", "") or ""
++                        m = re.search(r"/round/([a-z0-9_-]+)\.", src)
++                        if m:
++                            win_type = m.group(1)
+                     break
+ 
+             rounds.append({
+                 "round_num": round_num,
+                 "winner": winner,
+                 "side": winning_side,
++                "win_type": win_type,
+             })
+ 
+     return rounds
+@@ -417,6 +453,7 @@ def _parse_maps(html: HTMLParser) -> list[dict]:
+         # duration that we need to exclude. Extract just the first text node.
+         map_name = ""
+         picked_by = ""
++        picked_by_team = ""
+         map_container = game_elem.css_first(".vm-stats-game-header .map")
+         if map_container:
+             # Get the map name from the span that contains only the name,
+@@ -425,6 +462,15 @@ def _parse_maps(html: HTMLParser) -> list[dict]:
+             dur_elem = map_container.css_first(".map-duration")
+             if pick_elem:
+                 picked_by = pick_elem.text(strip=True)
++                # VALTrack clone patch: the picked label only reads "PICK"; the
++                # team that picked is encoded as mod-1 (team1) or mod-2 (team2)
++                # on the element class. Surface it so the veto reconstruction can
++                # cross-check pick attribution. Re-apply after a re-clone.
++                pick_cls = pick_elem.attributes.get("class", "") or ""
++                if "mod-1" in pick_cls:
++                    picked_by_team = "team1"
++                elif "mod-2" in pick_cls:
++                    picked_by_team = "team2"
+             # Remove child text to isolate map name
+             full_text = map_container.text(strip=True)
+             subtract = ""
+@@ -447,6 +493,7 @@ def _parse_maps(html: HTMLParser) -> list[dict]:
+         maps.append({
+             "map_name": map_name,
+             "picked_by": picked_by,
++            "picked_by_team": picked_by_team,
+             "duration": duration,
+             "score": scores["score"],
+             "score_ct": scores["score_ct"],
+@@ -606,7 +653,15 @@ def _parse_advanced_stats(html: HTMLParser) -> list[dict]:
+         if not cells:
+             continue
+ 
++        # VALTrack clone patch: the performance name cell is "alias TAG" (the
++        # team tag in a .team-tag child). Strip the tag so the name matches the
++        # plain alias used in the overview tables. Re-apply after a re-clone.
+         player_name = extract_text_content(cells[0]) if cells else ""
++        tag_elem = cells[0].css_first(".team-tag") if cells else None
++        if tag_elem:
++            tag = extract_text_content(tag_elem)
++            if tag and player_name.endswith(tag):
++                player_name = player_name[: -len(tag)].strip()
+         stat_dict: dict[str, str] = {"player": player_name}
+ 
+         for idx, cell in enumerate(cells[1:], start=1):
+@@ -622,15 +677,29 @@ def _parse_advanced_stats(html: HTMLParser) -> list[dict]:
+ # Economy tab parser
+ # ---------------------------------------------------------------------------
+ 
+-def _parse_economy(html: HTMLParser) -> list[dict]:
++def _parse_economy(html: HTMLParser, game_id: str | None = None) -> list[dict]:
+     """
+     Parse the economy table from the economy tab.
+ 
+     Rows per team with pistol/eco/semi-buy/full-buy win rates.
++
++    VALTrack clone patch: the economy tab page embeds one econ table per map
++    inside a .vm-stats-game block keyed by data-game-id, plus an "all" block.
++    The unpatched scraper took css_first, which returns the first map's table for
++    every game id (the long-standing per-map economy bug). When game_id is given,
++    select that game's own block so each map gets its real economy. Re-apply after
++    a re-clone (see the VALTrack README clone-patches note).
+     """
+     economy: list[dict] = []
+ 
+-    table = html.css_first("table.wf-table-inset.mod-econ")
++    table = None
++    if game_id:
++        for block in html.css(".vm-stats-game"):
++            if block.attributes.get("data-game-id") == str(game_id):
++                table = block.css_first("table.wf-table-inset.mod-econ")
++                break
++    if table is None:
++        table = html.css_first("table.wf-table-inset.mod-econ")
+     if not table:
+         return economy
+ 
+@@ -750,7 +819,7 @@ async def vlr_match_detail(match_id: str) -> dict:
+                         "advanced_stats": _parse_advanced_stats(tab_html),
+                     }
+                 elif tab == "economy":
+-                    economy_by_game[game_id] = _parse_economy(tab_html)
++                    economy_by_game[game_id] = _parse_economy(tab_html, game_id)
+ 
+         event_info = _parse_event_info(base_html)
+         header_info = _parse_match_header(base_html)
+diff --git a/api/utils/rate_limiter.py b/api/utils/rate_limiter.py
+index a0bb8eb..628e8ea 100644
+--- a/api/utils/rate_limiter.py
++++ b/api/utils/rate_limiter.py
+@@ -31,9 +31,9 @@ logger = logging.getLogger(__name__)
+ #   expensive: 20 req/min — 3+ sub-scrapes (match detail, player, team, stats)
+ # ---------------------------------------------------------------------------
+ TIERS: dict[str, tuple[int, int]] = {
+-    "cheap": (200, 60),
+-    "moderate": (60, 60),
+-    "expensive": (20, 60),
++    "cheap": (600, 60),
++    "moderate": (600, 60),
++    "expensive": (600, 60),
+ }
+ 
+ # URL-pattern → tier mapping. Order matters: more specific paths first.
+diff --git a/tests/test_match_detail_scraper.py b/tests/test_match_detail_scraper.py
+index 8ad0cc9..f7547a1 100644
+--- a/tests/test_match_detail_scraper.py
++++ b/tests/test_match_detail_scraper.py
+@@ -18,8 +18,8 @@ PLAYER_ROW = """
+   <td>75%</td>
+   <td>160</td>
+   <td>30%</td>
+-  <td>3</td>
+-  <td>2</td>
++  <td><span class="side mod-both">3</span><span class="side mod-t">2</span><span class="side mod-ct">1</span></td>
++  <td><span class="side mod-both">2</span><span class="side mod-t">1</span><span class="side mod-ct">1</span></td>
+   <td>+1</td>
+ </tr>
+ """
+@@ -169,6 +169,11 @@ async def test_vlr_match_detail_fetches_performance_and_economy_for_all_games(mo
+         "advanced_stats": [{"player": "TenZ", "2K": "3"}],
+     }
+     assert segment["maps"][0]["economy"] == [{"Team": "Team One", "Pistol": "50%"}]
++    # The player row carries per-side first kills and deaths (T = attack, CT =
++    # defense) alongside the combined value.
++    p0 = segment["maps"][0]["players"]["team1"][0]
++    assert (p0["fk"], p0["fk_t"], p0["fk_ct"]) == ("3", "2", "1")
++    assert (p0["fd"], p0["fd_t"], p0["fd_ct"]) == ("2", "1", "1")
+     assert segment["maps"][1]["performance"] == {
+         "kill_matrix": [{"player": "TenZ", "kills_vs": {"Opponent B": "5"}}],
+         "advanced_stats": [{"player": "TenZ", "2K": "3"}],

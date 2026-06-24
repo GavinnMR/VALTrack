@@ -170,6 +170,16 @@ and each is marked in that file with a `VALTrack clone patch` comment:
 Without these the app still runs, but the affected figures (opening duels,
 economy, round win conditions, and the veto pick cross-check) stay empty.
 
+The exact diff is kept in `vlrggapi-patches/clone-patches.diff`, so after a fresh
+clone you can apply all of them at once from inside the `vlrggapi/` folder:
+
+```
+git apply ../vlrggapi-patches/clone-patches.diff
+```
+
+See `vlrggapi-patches/README.md` for the base commit and what to do if upstream has
+moved on.
+
 ## First-time data harvest
 
 This is a one-time load, run from the terminal, not the app. It has two passes.
