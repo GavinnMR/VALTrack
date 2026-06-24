@@ -511,6 +511,37 @@ def player_aggregates(rows, team_name):
     return out
 
 
+def player_recent_ratings(rows, team_name, last_maps=10):
+    """Each player's rating over their most recent maps, for a form trajectory.
+
+    The per-player table shows a window average and the per-map spread, but not
+    direction: one star heating up or going cold swings a match, and that is
+    invisible in a flat average. This takes the same per-map player rows
+    player_aggregates reads (each needs team_name, player_name, match_date,
+    rating, and map_rounds) and, per player, round-weights the rating over only
+    their `last_maps` most recent maps (newest by match_date), so it can be shown
+    beside the full-window rating with the delta.
+
+    Rows for the other team are ignored. A map with no date sorts oldest so it
+    never crowds out a dated recent map. Returns a dict keyed by player_name, each
+    value {recent_rating, recent_maps}; recent_rating is None when none of the
+    recent maps carried a rating. This is one player's own figure and its trend,
+    never a composite across players or a winner call.
+    """
+    by_player = {}
+    for row in rows:
+        if row["team_name"] != team_name:
+            continue
+        by_player.setdefault(row["player_name"], []).append(row)
+    out = {}
+    for name, prows in by_player.items():
+        prows = sorted(prows, key=lambda r: (r["match_date"] or ""), reverse=True)
+        recent = prows[:last_maps]
+        rating = _weighted_mean((r["rating"], r["map_rounds"]) for r in recent)
+        out[name] = {"recent_rating": rating, "recent_maps": len(recent)}
+    return out
+
+
 def per_map_splits(map_rows, round_rows, team_name):
     """Combine the map win record and side splits into one per-map table.
 
@@ -762,6 +793,25 @@ def wilson_interval(won, total, z=1.96):
     centre = (phat + z * z / (2 * total)) / denom
     margin = z * math.sqrt((phat * (1 - phat) + z * z / (4 * total)) / total) / denom
     return (max(0.0, centre - margin), min(1.0, centre + margin))
+
+
+def bands_overlap(a_won, a_total, b_won, b_total):
+    """Whether two rates' Wilson confidence bands overlap, so a gap is within noise.
+
+    The per-row gap says which team is higher, but not whether the difference can
+    be told apart from sampling noise. This builds each team's 95% Wilson interval
+    and returns True when they intersect (the gap is not distinguishable at that
+    confidence, for example 53% vs 49% over twenty matches), False when the two
+    intervals are disjoint (a real, resolvable edge), and None when either side has
+    no sample to build an interval from. It annotates a single per-statistic
+    difference with how much weight it carries; it never tallies rows or calls a
+    match winner.
+    """
+    a = wilson_interval(a_won, a_total)
+    b = wilson_interval(b_won, b_total)
+    if a is None or b is None:
+        return None
+    return a[0] <= b[1] and b[0] <= a[1]
 
 
 def infer_match_format(team_score, opp_score):

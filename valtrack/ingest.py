@@ -325,24 +325,76 @@ def link_match_teams(conn):
     )
 
 
-def matches_needing_detail(conn):
+def matches_needing_detail(conn, since=None):
     """match_ids that are decided but have no per-match detail stored yet.
 
     A match is "done" once details_fetched_at is set, even when it parsed to zero
     maps (a forfeit), so those are not refetched forever. Undecided matches with
     no score are skipped, since there is no detail to pull. Newest first, because
-    recent matches are the most relevant to look at.
+    recent matches are the most relevant to look at. `since` (an ISO date) bounds
+    the selection to matches on or after that date, for a windowed backfill.
     """
+    params = []
+    date_clause = ""
+    if since:
+        date_clause = "AND date >= ? "
+        params.append(since)
     rows = conn.execute(
         "SELECT match_id FROM matches "
         "WHERE details_fetched_at IS NULL AND team1_score IS NOT NULL "
-        "ORDER BY date DESC, match_id DESC"
+        f"{date_clause}"
+        "ORDER BY date DESC, match_id DESC",
+        params,
+    ).fetchall()
+    return [row["match_id"] for row in rows]
+
+
+def matches_missing_analytics(conn, since=None):
+    """match_ids to re-detail so the newer rich tables (economy, performance) fill.
+
+    The detail pass shipped before the per-map economy and series-performance
+    tables existed, so most already-detailed matches carry the core detail (maps,
+    rounds, players) but no map_economy rows. This selects those alongside any
+    brand-new undetailed match, so one re-detail run fills the gap:
+
+      - never detailed (details_fetched_at IS NULL), or
+      - detailed and has maps, but no map_economy rows (a pre-patch detail).
+
+    A forfeit (detailed, zero maps) has no map_results, so it is not reselected,
+    and a match re-detailed with the patched scraper gains economy rows and drops
+    out, so this stays re-runnable. `since` (an ISO date) bounds it to a recent
+    window, which is the point: a scout does not need years-old economy, so the
+    backfill is kept to roughly the last year or two rather than the full table.
+    Newest first.
+    """
+    params = []
+    date_clause = ""
+    if since:
+        date_clause = "AND m.date >= ? "
+        params.append(since)
+    rows = conn.execute(
+        f"""
+        SELECT m.match_id FROM matches m
+        WHERE m.team1_score IS NOT NULL
+          AND (
+            m.details_fetched_at IS NULL
+            OR (
+              EXISTS (SELECT 1 FROM map_results mr WHERE mr.match_id = m.match_id)
+              AND NOT EXISTS (
+                  SELECT 1 FROM map_economy me WHERE me.match_id = m.match_id)
+            )
+          )
+          {date_clause}
+        ORDER BY m.date DESC, m.match_id DESC
+        """,
+        params,
     ).fetchall()
     return [row["match_id"] for row in rows]
 
 
 def ingest_match_details(
-    client, conn, scope="full", limit=None, progress=print
+    client, conn, scope="full", limit=None, progress=print,
+    redetail=False, since=None,
 ):
     """The expensive per-match pass: pull detail for each match missing it.
 
@@ -352,11 +404,19 @@ def ingest_match_details(
     matches. Full and incremental select the same set (matches still lacking
     detail); the scope name is kept for parity with run_ingest. limit caps how
     many matches to process in one run, for batching or a quick smoke test.
+
+    When redetail is set, the selection switches to matches missing the newer
+    economy and performance tables (plus any undetailed match), so a bounded
+    re-detail backfills the rich tables on matches detailed before those tables
+    existed. `since` (an ISO date) bounds either selection to a recent window.
     """
     if scope not in ("full", "incremental"):
         raise ValueError(f"unknown scope: {scope}")
 
-    ids = matches_needing_detail(conn)
+    if redetail:
+        ids = matches_missing_analytics(conn, since)
+    else:
+        ids = matches_needing_detail(conn, since)
     if limit is not None:
         ids = ids[:limit]
 
@@ -388,11 +448,13 @@ def ingest_match_details(
 
 
 def run_detail_ingest(scope="full", client=None, db_path=db.DB_PATH,
-                      limit=None, progress=print):
+                      limit=None, progress=print, redetail=False, since=None):
     """Open a connection and run the per-match detail pass over all teams.
 
     The terminal entry point for the expensive pass. The cheap list-level harvest
-    (run_ingest) must have populated matches first.
+    (run_ingest) must have populated matches first. redetail and since are passed
+    through for a bounded re-detail that fills the newer economy and performance
+    tables (see ingest_match_details).
     """
     if scope not in ("full", "incremental"):
         raise ValueError(f"unknown scope: {scope}")
@@ -401,7 +463,8 @@ def run_detail_ingest(scope="full", client=None, db_path=db.DB_PATH,
     db.init_db(db_path)
     conn = db.connect(db_path)
     try:
-        return ingest_match_details(client, conn, scope, limit, progress)
+        return ingest_match_details(
+            client, conn, scope, limit, progress, redetail=redetail, since=since)
     finally:
         conn.close()
 

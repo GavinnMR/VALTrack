@@ -6,6 +6,7 @@ survive VLR's unreliable staff flag and its occasionally mangled role text.
 """
 from valtrack.stats import (
     align_rosters,
+    bands_overlap,
     calibration,
     canonical_player_name,
     classify_roster,
@@ -845,6 +846,68 @@ def test_wilson_interval_handles_the_extremes_without_running_past_bounds():
     assert high <= 1.0 and low < 1.0   # 100% still has a lower bound below 1
     low0, high0 = wilson_interval(0, 10)
     assert low0 >= 0.0 and high0 > 0.0
+
+
+def test_bands_overlap_thin_samples_are_not_distinguishable():
+    # 53% over ~20 vs 49% over ~20: wide bands that cross, so within noise.
+    assert bands_overlap(11, 21, 10, 21) is True
+
+
+def test_bands_overlap_separates_on_a_deep_lopsided_sample():
+    # 70% over 1000 vs 40% over 1000: tight bands far apart, a real edge.
+    assert bands_overlap(700, 1000, 400, 1000) is False
+
+
+def test_bands_overlap_none_when_a_side_has_no_sample():
+    assert bands_overlap(0, 0, 5, 10) is None
+    assert bands_overlap(5, 10, 0, 0) is None
+
+
+# --- per-player recent rating trajectory (P4) -------------------------------
+
+def _recent_row(name, team, mdate, rating, rounds=20):
+    return {"player_name": name, "team_name": team, "match_date": mdate,
+            "rating": rating, "map_rounds": rounds}
+
+
+def test_player_recent_ratings_uses_only_the_last_n_maps():
+    from valtrack.stats import player_recent_ratings
+
+    # Three old maps at 1.0, then two recent maps at 1.5: last 2 average to 1.5.
+    rows = [
+        _recent_row("ace", "A", "2026-01-01", 1.0),
+        _recent_row("ace", "A", "2026-01-02", 1.0),
+        _recent_row("ace", "A", "2026-01-03", 1.0),
+        _recent_row("ace", "A", "2026-05-01", 1.5),
+        _recent_row("ace", "A", "2026-05-02", 1.5),
+    ]
+    out = player_recent_ratings(rows, "A", last_maps=2)
+    assert out["ace"]["recent_maps"] == 2
+    assert abs(out["ace"]["recent_rating"] - 1.5) < 1e-9
+
+
+def test_player_recent_ratings_round_weights_within_the_recent_window():
+    from valtrack.stats import player_recent_ratings
+
+    # Two recent maps: 2.0 over 10 rounds and 1.0 over 30 rounds -> 1.25 weighted.
+    rows = [
+        _recent_row("ace", "A", "2026-05-02", 2.0, rounds=10),
+        _recent_row("ace", "A", "2026-05-01", 1.0, rounds=30),
+    ]
+    out = player_recent_ratings(rows, "A", last_maps=5)
+    assert abs(out["ace"]["recent_rating"] - 1.25) < 1e-9
+
+
+def test_player_recent_ratings_ignores_other_team_and_handles_no_rating():
+    from valtrack.stats import player_recent_ratings
+
+    rows = [
+        _recent_row("ace", "A", "2026-05-01", None),
+        _recent_row("opp", "B", "2026-05-01", 1.4),
+    ]
+    out = player_recent_ratings(rows, "A", last_maps=5)
+    assert set(out) == {"ace"}
+    assert out["ace"]["recent_rating"] is None  # the one map had no rating
 
 
 # --- agent compositions per map (item 3) ------------------------------------

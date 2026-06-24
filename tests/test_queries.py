@@ -540,6 +540,84 @@ def test_match_date_bounds(tmp_path):
     conn.close()
 
 
+def test_rich_coverage_counts_economy_performance_and_win_types(tmp_path):
+    from valtrack.queries import rich_coverage
+
+    conn = _fresh_conn(tmp_path)
+    _seed_detail_match(conn)  # team 1 Alpha, one Lotus map, dated 2026-05-01
+    # Economy on one map, performance on one match, two won rounds with a type.
+    for buy in ("eco", "full"):
+        conn.execute(
+            "INSERT INTO map_economy (match_id, map_name, team_name, buy_type, "
+            "played, won) VALUES (1, 'Lotus', 'Alpha', ?, 5, 3)",
+            (buy,),
+        )
+    conn.execute(
+        "INSERT INTO match_player_perf (match_id, player_name, team_name, "
+        "clutch_1v1) VALUES (1, 'a1', 'Alpha', 1)"
+    )
+    for side, wt in (("atk", "boom"), ("def", "elim")):
+        conn.execute(
+            "INSERT INTO rounds (match_id, map_name, round_number, winner_side, "
+            "winner_team, win_type) VALUES (1, 'Lotus', 1, ?, 'Alpha', ?)",
+            (side, wt),
+        )
+    conn.commit()
+
+    cov = rich_coverage(conn, 1)
+    assert cov["economy_maps"] == 1          # one distinct (match, map)
+    assert cov["performance_matches"] == 1
+    assert cov["win_condition_rounds"] == 2
+    # A team with no detail comes back all zeros, not an error.
+    assert rich_coverage(conn, 999) == {
+        "economy_maps": 0, "performance_matches": 0, "win_condition_rounds": 0}
+    conn.close()
+
+
+def test_recent_map_pool_keeps_current_drops_retired_and_junk(tmp_path):
+    from valtrack.queries import recent_map_pool
+
+    conn = _fresh_conn(tmp_path)
+
+    def add(match_id, mdate, map_name):
+        conn.execute(
+            "INSERT INTO matches (match_id, team1_score, team2_score, date) "
+            "VALUES (?, 2, 0, ?)",
+            (match_id, mdate),
+        )
+        conn.execute(
+            "INSERT INTO map_results (match_id, map_name, winner_name) "
+            "VALUES (?, ?, 'A')",
+            (match_id, map_name),
+        )
+
+    mid = 0
+    # A current map seen in 6 recent matches (above the floor).
+    for _ in range(6):
+        mid += 1
+        add(mid, "2026-06-10", "Lotus")
+    # A map rotating in at only 2 recent matches (below the floor of 5).
+    for _ in range(2):
+        mid += 1
+        add(mid, "2026-06-10", "Corrode")
+    # A retired map only seen long before the recent window.
+    for _ in range(8):
+        mid += 1
+        add(mid, "2025-01-01", "Icebox")
+    # Junk placeholder, recent but should never be a real map (and below floor).
+    mid += 1
+    add(mid, "2026-06-10", "TBD")
+    conn.commit()
+
+    # Anchored to the latest date (2026-06-10), 90-day window, floor of 5.
+    pool = recent_map_pool(conn, days=90, floor=5)
+    assert pool == {"Lotus"}
+    # A lower floor pulls in the rotating-in map but still excludes the retired one.
+    assert "Corrode" in recent_map_pool(conn, days=90, floor=2)
+    assert "Icebox" not in recent_map_pool(conn, days=90, floor=1)
+    conn.close()
+
+
 def _add_ordered_map(conn, match_id, order, map_name, t1_name, t2_name, winner):
     conn.execute(
         """

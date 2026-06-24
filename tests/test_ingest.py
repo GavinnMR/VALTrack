@@ -6,7 +6,12 @@ whose fields are blank. These tests lock in that we stop at the true end and
 never store the junk rows.
 """
 from valtrack import db
-from valtrack.ingest import ingest_team_matches, resolve_ranking
+from valtrack.ingest import (
+    ingest_team_matches,
+    matches_missing_analytics,
+    matches_needing_detail,
+    resolve_ranking,
+)
 
 
 def _real_match(match_id, opponent="Opponent", score="2:1"):
@@ -174,6 +179,71 @@ def test_resolve_ranking_prefers_earlier_ladder_on_collision():
     cache = {}
     hit = resolve_ranking(client, cache, "americas", "Ghost", "Ghost")
     assert hit["regional_rank"] == 2  # na is searched before br
+
+
+def _detail_match(conn, match_id, mdate, detailed=False, maps=False, econ=False):
+    """A match row plus optional map_results and map_economy, for selection tests."""
+    conn.execute(
+        "INSERT INTO matches (match_id, team1_score, team2_score, date, "
+        "details_fetched_at) VALUES (?, 2, 1, ?, ?)",
+        (match_id, mdate, "2026-01-01T00:00:00+00:00" if detailed else None),
+    )
+    if maps:
+        conn.execute(
+            "INSERT INTO map_results (match_id, map_name, winner_name) "
+            "VALUES (?, 'Ascent', 'A')",
+            (match_id,),
+        )
+    if econ:
+        conn.execute(
+            "INSERT INTO map_economy (match_id, map_name, team_name, buy_type, "
+            "played, won) VALUES (?, 'Ascent', 'A', 'eco', 3, 1)",
+            (match_id,),
+        )
+
+
+def test_matches_needing_detail_since_bounds_the_window(tmp_path):
+    conn = _fresh_conn(tmp_path)
+    _detail_match(conn, 1, "2024-01-01")  # old, undetailed
+    _detail_match(conn, 2, "2026-05-01")  # recent, undetailed
+    conn.execute(
+        "INSERT INTO matches (match_id, team1_score, team2_score, date) "
+        "VALUES (3, NULL, NULL, '2026-05-02')"  # undecided, never selected
+    )
+    conn.commit()
+
+    assert matches_needing_detail(conn) == [2, 1]
+    assert matches_needing_detail(conn, since="2025-01-01") == [2]
+    conn.close()
+
+
+def test_matches_missing_analytics_picks_predetail_and_new_only(tmp_path):
+    conn = _fresh_conn(tmp_path)
+    # Detailed before the economy table existed: has maps, no economy -> reselect.
+    _detail_match(conn, 1, "2026-05-01", detailed=True, maps=True, econ=False)
+    # Detailed with the patched scraper: has economy -> done, not reselected.
+    _detail_match(conn, 2, "2026-05-02", detailed=True, maps=True, econ=True)
+    # A forfeit: detailed, no maps -> not reselected (nothing to fill).
+    _detail_match(conn, 3, "2026-05-03", detailed=True, maps=False, econ=False)
+    # Brand-new, never detailed -> selected.
+    _detail_match(conn, 4, "2026-05-04", detailed=False)
+    conn.commit()
+
+    got = matches_missing_analytics(conn)
+    assert set(got) == {1, 4}
+    # Newest first.
+    assert got == [4, 1]
+    conn.close()
+
+
+def test_matches_missing_analytics_since_bounds_the_window(tmp_path):
+    conn = _fresh_conn(tmp_path)
+    _detail_match(conn, 1, "2023-01-01", detailed=True, maps=True, econ=False)
+    _detail_match(conn, 2, "2026-05-01", detailed=True, maps=True, econ=False)
+    conn.commit()
+
+    assert matches_missing_analytics(conn, since="2025-01-01") == [2]
+    conn.close()
 
 
 def test_duplicate_real_rows_across_pages_do_not_loop(tmp_path):

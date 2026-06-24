@@ -322,16 +322,17 @@ def team_player_stats(conn, team_id, window=None, stage=None):
     """Return per-player per-map stat lines for this team within the window.
 
     One row per player per map the team played, framed by the detail-page team
-    naming: match_id, player_name, player_id, agent, the per-map rating / acs /
-    kills / deaths / assists / kast / adr / hs_pct, the first_kills / first_deaths,
-    and the map's total rounds (both teams' scores summed) used to round-weight the
-    rate stats and to turn kills and assists into per-round figures. The round
-    count comes from map_results and is NULL when no result row is stored, in
-    which case the aggregation skips that map's round-weighted contribution. The
-    match_id lets stats.lineup_continuity tell maps apart when a map name repeats
-    across matches. The date filter is on the parent match and the optional stage
-    filter narrows to group or playoff play. Feeds stats.player_aggregates. Returns
-    [] when the team has no stored detail.
+    naming: match_id, match_date, player_name, player_id, agent, the per-map
+    rating / acs / kills / deaths / assists / kast / adr / hs_pct, the first_kills
+    / first_deaths, and the map's total rounds (both teams' scores summed) used to
+    round-weight the rate stats and to turn kills and assists into per-round
+    figures. The round count comes from map_results and is NULL when no result row
+    is stored, in which case the aggregation skips that map's round-weighted
+    contribution. The match_id lets stats.lineup_continuity tell maps apart when a
+    map name repeats across matches, and match_date lets stats.player_recent_ratings
+    take each player's most recent maps. The date filter is on the parent match and
+    the optional stage filter narrows to group or playoff play. Feeds
+    stats.player_aggregates. Returns [] when the team has no stored detail.
     """
     name = _team_name(conn, team_id)
     if name is None:
@@ -339,7 +340,8 @@ def team_player_stats(conn, team_id, window=None, stage=None):
     scope, sparams = _scope(window, None, stage, "m.")
     return conn.execute(
         f"""
-        SELECT mps.match_id, mps.player_name, mps.player_id, mps.team_name,
+        SELECT mps.match_id, m.date AS match_date,
+               mps.player_name, mps.player_id, mps.team_name,
                mps.map_name, mps.agent,
                mps.rating, mps.acs, mps.kills, mps.deaths, mps.assists,
                mps.kast, mps.adr, mps.hs_pct,
@@ -731,6 +733,39 @@ def last_match_date(conn, team_id):
     return row["last"] if row else None
 
 
+def recent_map_pool(conn, days=90, floor=5, as_of=None):
+    """The de-facto current competitive map pool, from recent cross-team play.
+
+    Rather than hardcode a pool that goes stale each patch, this reads which maps
+    actually appeared in stored matches over the last `days`, across all teams,
+    and keeps those seen in at least `floor` distinct matches. The floor drops a
+    map rotating in at a handful of appearances and the junk "TBD" map, leaving
+    the maps a current matchup can really be played on. Anchored to the latest
+    stored match date by default (so it does not drift with the wall clock), or to
+    `as_of` for tests. Returns a set of map names. Used to filter or flag maps that
+    have left rotation in the map tables and the veto reconstruction, so an
+    all-time window does not surface a map that cannot be played now.
+    """
+    anchor = as_of or conn.execute(
+        "SELECT MAX(date) FROM matches WHERE date IS NOT NULL"
+    ).fetchone()[0]
+    if not anchor:
+        return set()
+    cutoff = (date.fromisoformat(anchor) - timedelta(days=days)).isoformat()
+    rows = conn.execute(
+        """
+        SELECT mr.map_name, COUNT(DISTINCT mr.match_id) AS matches
+        FROM map_results mr
+        JOIN matches m ON m.match_id = mr.match_id
+        WHERE m.date >= ? AND mr.map_name IS NOT NULL
+        GROUP BY mr.map_name
+        HAVING matches >= ?
+        """,
+        (cutoff, floor),
+    ).fetchall()
+    return {r["map_name"] for r in rows}
+
+
 def match_date_bounds(conn):
     """Return (min_date, max_date) ISO strings across stored matches.
 
@@ -835,6 +870,59 @@ def detail_coverage(conn, team_id, window=None, events=None, stage=None):
         [team_id, team_id, *sparams],
     ).fetchone()
     return {"total": row["total"] or 0, "detailed": row["detailed"] or 0}
+
+
+def rich_coverage(conn, team_id, window=None, stage=None):
+    """How many maps, matches, and rounds back the detail-dependent sections.
+
+    Several sections (economy, clutches and other performance, round win
+    conditions) only have data where the rich tables were harvested, which lags
+    the core detail. Rather than let the user scroll into empty sections to find
+    that out, this counts, for a team in the window and stage:
+
+      - economy_maps: distinct maps with stored buy-type economy,
+      - performance_matches: distinct matches with stored series performance
+        (clutches, multikills, plants, defuses),
+      - win_condition_rounds: rounds this team won that carry a win condition.
+
+    Resolved to the detail-page team name like the other detail reads. This is
+    meta-honesty about sample size; it adds no figure and calls no winner.
+    """
+    blank = {"economy_maps": 0, "performance_matches": 0,
+             "win_condition_rounds": 0}
+    name = _team_name(conn, team_id)
+    if name is None:
+        return blank
+    scope, sparams = _scope(window, None, stage, "m.")
+    econ = conn.execute(
+        f"""
+        SELECT COUNT(DISTINCT me.match_id || '|' || me.map_name) AS n
+        FROM map_economy me
+        JOIN matches m ON m.match_id = me.match_id
+        WHERE me.team_name = ? AND {scope}
+        """,
+        [name, *sparams],
+    ).fetchone()["n"]
+    perf = conn.execute(
+        f"""
+        SELECT COUNT(DISTINCT mpp.match_id) AS n
+        FROM match_player_perf mpp
+        JOIN matches m ON m.match_id = mpp.match_id
+        WHERE mpp.team_name = ? AND {scope}
+        """,
+        [name, *sparams],
+    ).fetchone()["n"]
+    wins = conn.execute(
+        f"""
+        SELECT COUNT(*) AS n
+        FROM rounds r
+        JOIN matches m ON m.match_id = r.match_id
+        WHERE r.winner_team = ? AND r.win_type IS NOT NULL AND {scope}
+        """,
+        [name, *sparams],
+    ).fetchone()["n"]
+    return {"economy_maps": econ or 0, "performance_matches": perf or 0,
+            "win_condition_rounds": wins or 0}
 
 
 def team_window_summary(conn, team_id, window=None, events=None, stage=None):

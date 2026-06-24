@@ -10,6 +10,11 @@ Two passes, selected with --pass:
   harvest time. It only fetches matches that do not already have detail, so it
   is safe to re-run and resume after a stop or failure.
 
+  details --redetail: re-fetch matches that were detailed before the per-map
+  economy and series-performance tables existed, so those rich tables fill in.
+  Pair it with --since to keep the backfill to a recent window (a scout does not
+  need years-old economy), for example the last twelve to eighteen months.
+
 Run the cheap pass first so there are matches to pull detail for.
 
 Usage:
@@ -17,6 +22,7 @@ Usage:
     python harvest.py --pass cheap --scope incremental   only new matches
     python harvest.py --pass details                     fill detail for matches missing it
     python harvest.py --pass details --limit 50          process only the newest 50
+    python harvest.py --pass details --redetail --since 2025-01-01   backfill economy and performance for recent matches
 
 Make sure vlrggapi is running at http://127.0.0.1:3001 before harvesting.
 """
@@ -42,10 +48,16 @@ def _run_cheap(scope):
         print(f"  errors: {', '.join(summary['errors'])}")
 
 
-def _run_details(scope, limit):
-    print(f"starting detail {scope} harvest" + (f" (limit {limit})" if limit else ""))
+def _run_details(scope, limit, redetail=False, since=None):
+    label = "re-detail" if redetail else "detail"
+    extra = "".join([
+        f" (limit {limit})" if limit else "",
+        f" since {since}" if since else "",
+    ])
+    print(f"starting {label} {scope} harvest{extra}")
     start = time.monotonic()
-    summary = run_detail_ingest(scope=scope, limit=limit)
+    summary = run_detail_ingest(
+        scope=scope, limit=limit, redetail=redetail, since=since)
     elapsed = time.monotonic() - start
 
     print("")
@@ -79,12 +91,23 @@ def main():
         default=None,
         help="details only: cap how many matches to process in this run",
     )
+    parser.add_argument(
+        "--redetail",
+        action="store_true",
+        help="details only: also re-fetch matches detailed before the economy "
+             "and performance tables existed, to backfill those rich tables",
+    )
+    parser.add_argument(
+        "--since",
+        default=None,
+        help="details only: limit to matches on or after this date (YYYY-MM-DD)",
+    )
     args = parser.parse_args()
 
     if args.which == "cheap":
         _run_cheap(args.scope)
     else:
-        _run_details(args.scope, args.limit)
+        _run_details(args.scope, args.limit, args.redetail, args.since)
 
 
 if __name__ == "__main__":

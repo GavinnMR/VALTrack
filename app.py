@@ -14,7 +14,8 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from valtrack import db, eras, freshness, ingest, journal, queries, stats, veto
+from valtrack import (
+    db, eras, freshness, ingest, journal, queries, schedule, stats, veto)
 from valtrack.window import DateWindow, EventFilter, StageFilter, is_lan_event
 
 # A team is flagged stale once this many days pass with no match.
@@ -39,6 +40,10 @@ MIN_PISTOLS = 10       # pistol rounds behind the pistol rate
 MIN_DUELS = 20         # opening duels behind an opening-duel rate
 MIN_PLAYER_MAPS = 4    # maps behind a player's aggregated line
 MIN_VETO_APPEAR = 5    # times a map was in the pool behind its veto rates
+
+# How many of a player's most recent maps the recent-rating trajectory averages
+# (P4). Small enough to catch a hot or cold streak, large enough to not be one map.
+PLAYER_RECENT_MAPS = 10
 
 FLAG = "⚠"        # the small-sample marker shown next to a thin figure
 
@@ -220,6 +225,11 @@ def cq_window_summary(db_key, _conn, team_id, window, events, stage):
 
 
 @st.cache_data(show_spinner=False)
+def cq_rich_coverage(db_key, _conn, team_id, window, stage):
+    return queries.rich_coverage(_conn, team_id, window, stage)
+
+
+@st.cache_data(show_spinner=False)
 def cq_rest_load(db_key, _conn, team_id):
     return queries.team_rest_load(_conn, team_id)
 
@@ -232,6 +242,47 @@ def cq_meeting_maps(db_key, _conn, match_id):
 @st.cache_data(show_spinner=False)
 def cq_meeting_lineup(db_key, _conn, match_id, team_name):
     return queries.meeting_lineup(_conn, match_id, team_name)
+
+
+@st.cache_data(show_spinner=False)
+def cq_map_pool(db_key, _conn):
+    # The current rotation as a sorted tuple, so it is hashable and stable for the
+    # cache. Read as a set wherever it is used.
+    return tuple(sorted(queries.recent_map_pool(_conn)))
+
+
+# --- current-map-pool guardrail (P2) ----------------------------------------
+# Over a wide window, retired maps (Icebox, Sunset) and the junk "TBD" map leak
+# into the map tables and the veto reconstruction. These two helpers gate which
+# maps a map table shows: non-Valorant junk is always dropped, and an out-of-
+# rotation map is either hidden (pool-only on) or marked (pool-only off).
+
+ROTATED_OUT_MARK = " (rotated out)"
+
+
+def map_visible(name, current_pool, pool_only):
+    """Whether a map should appear in a map table at all.
+
+    Drops anything that is not a real Valorant map (the junk "TBD", a null name).
+    When the current-pool filter is on and a current pool is known, also drops a
+    canonical map that has left rotation, so the table shows only playable maps.
+    """
+    if name not in veto.CANON_MAPS:
+        return False
+    if pool_only and current_pool and name not in current_pool:
+        return False
+    return True
+
+
+def rotation_mark(name, current_pool):
+    """A suffix marking a canonical map that is out of the current rotation.
+
+    Blank when the map is current (or the pool is unknown), so a stale high win
+    rate on a retired map is visible rather than reading as a current strength.
+    """
+    if current_pool and name in veto.CANON_MAPS and name not in current_pool:
+        return ROTATED_OUT_MARK
+    return ""
 
 
 # --- small formatting helpers for the aligned and numeric tables ------------
@@ -265,6 +316,13 @@ PLAYER_COLUMN_CONFIG = {
     "Rating": st.column_config.NumberColumn(
         "Rating", format="%.2f",
         help="VLR composite rating, round-weighted across the player's maps"),
+    f"Rating L{PLAYER_RECENT_MAPS}": st.column_config.NumberColumn(
+        f"Rating L{PLAYER_RECENT_MAPS}", format="%.2f",
+        help=f"Round-weighted rating over the player's last {PLAYER_RECENT_MAPS} "
+             "maps in range, so a hot or cold streak shows"),
+    "Rating trend": st.column_config.NumberColumn(
+        "Rating trend", format="%+.2f",
+        help="Recent rating minus the window rating: positive means trending up"),
     "Rating range": st.column_config.TextColumn(
         "Rating range", help="Lowest to highest single-map rating in range"),
     "Rating sigma": st.column_config.NumberColumn(
@@ -437,7 +495,9 @@ def render_record_and_form(conn, team, window, events, stage):
         winpct = "n/a"
     st.metric(f"Record ({window.label})", f"{record['wins']}-{record['losses']}")
     flag = flag_if_small(record["decided"], MIN_MATCHES)
-    st.caption(f"{record['decided']} decided matches, win rate {winpct}{flag}")
+    ci = ci_text(record["wins"], record["decided"])
+    ci_note = f". {ci}" if ci else ""
+    st.caption(f"{record['decided']} decided matches, win rate {winpct}{flag}{ci_note}")
 
     sos = cq_sos(k, conn, team["id"], window, events, stage)
     if sos["ranked"]:
@@ -495,14 +555,17 @@ def ci_text(won, total):
     return f"95% CI {100 * iv[0]:.0f} to {100 * iv[1]:.0f}%"
 
 
-def render_map_splits(conn, team, window, stage, highlight=None):
+def render_map_splits(conn, team, window, stage, highlight=None,
+                      current_pool=None, pool_only=False):
     """Per-map win rate with attack and defense side splits for the window.
 
     Computed from the stored rounds, so it only has figures for maps whose
     per-match detail has been harvested. When none is stored for this team in the
     range, say so plainly rather than show an empty table. Maps in the
     likely-played pool are marked with a star (item 20) so the relevant maps draw
-    the eye in every map table, not just the veto section.
+    the eye in every map table, not just the veto section. Junk maps are dropped,
+    and an out-of-rotation map is hidden when the current-pool filter is on or
+    marked when it is off (P2).
     """
     st.divider()
     st.subheader("Per-map and side win rates")
@@ -511,8 +574,11 @@ def render_map_splits(conn, team, window, stage, highlight=None):
     map_rows = cq_map_results(k, conn, team["id"], window, stage)
     round_rows = cq_rounds(k, conn, team["id"], window, stage)
     table = stats.per_map_splits(map_rows, round_rows, team["name"])
+    table = [m for m in table
+             if map_visible(m["map_name"], current_pool, pool_only)]
     if not table:
-        st.caption(DETAIL_EMPTY)
+        st.caption(DETAIL_EMPTY if not pool_only else
+                   "No current-rotation maps with detail in this range.")
         return
     rows = []
     for m in table:
@@ -520,7 +586,8 @@ def render_map_splits(conn, team, window, stage, highlight=None):
         flag = flag_if_small(m["rounds_total"], MIN_MAP_ROUNDS)
         star = "★ " if m["map_name"] in highlight else ""
         rows.append({
-            "Map": star + m["map_name"] + flag,
+            "Map": star + m["map_name"] + rotation_mark(m["map_name"], current_pool)
+                   + flag,
             "Maps": f"{m['won']}-{m['lost']}",
             "Map win%": pct_num(m["map_winrate"]) if decided else None,
             "ATK win%": pct_num(m["atk_winrate"]),
@@ -573,10 +640,17 @@ def render_map_splits(conn, team, window, stage, highlight=None):
         )
         st.plotly_chart(fig, width="stretch", key=f"mapchart_{team['id']}")
 
+    rot_note = (
+        f' A map marked "{ROTATED_OUT_MARK.strip()}" has left the current '
+        "rotation, so its win rate is frozen on a map that cannot be played now."
+        if current_pool and any(rotation_mark(m["map_name"], current_pool)
+                                for m in table) else ""
+    )
     st.caption(
         f"Map win% is over decided maps. Side win rates are over rounds played "
         f"on that side. Round and map counts are shown so a small sample is "
         f"visible; {FLAG} marks a map with fewer than {MIN_MAP_ROUNDS} rounds."
+        + rot_note
     )
     note = _map_opp_rank_note(conn, team, window, stage)
     if note:
@@ -714,7 +788,8 @@ def render_opening(conn, team, window, stage, five_names=None):
     overall, atk, defense = st.columns(3)
     overall.metric(
         "Opening-duel win%", pct(o["winrate"]),
-        help=f"{o['fk']} first kills of {o['duels']} opening duels",
+        help=f"{o['fk']} first kills of {o['duels']} opening duels. "
+             f"{ci_text(o['fk'], o['duels'])}",
     )
     atk.metric(
         "ATK opening%", pct(o["atk_winrate"]),
@@ -748,13 +823,15 @@ def render_opening(conn, team, window, stage, five_names=None):
         },
     )
     team_small = flag_if_small(o["duels"], MIN_DUELS)
+    ci = ci_text(o["fk"], o["duels"])
+    ci_note = f" The overall rate's confidence band is {ci}." if ci else ""
     st.caption(
         f"Opening-duel win rate is first kills over opening duels (first kills "
         f"plus first deaths). The attack and defense splits are per-side totals, "
         f"not a round-by-round timeline, since the source stores only per-map "
         f"first-kill and first-death counts. Duel counts are shown so a small "
         f"sample is visible; {FLAG} marks fewer than {MIN_DUELS} duels"
-        f"{' (team total included)' if team_small else ''}."
+        f"{' (team total included)' if team_small else ''}.{ci_note}"
     )
 
 
@@ -793,12 +870,21 @@ def render_player_stats(conn, team, window, stage, five_names=None):
     if not players:
         st.caption(DETAIL_EMPTY)
         return
+    # Each player's rating over their most recent maps, so a star heating up or
+    # cooling off is a number beside the window average, not buried in it (P4).
+    recent = stats.player_recent_ratings(rows, team["name"], PLAYER_RECENT_MAPS)
     table = []
     for p in players:
         sp = p["rating_spread"]
+        rec = recent.get(p["player_name"], {})
+        rec_rating = rec.get("recent_rating")
+        delta = (rec_rating - p["rating"]
+                 if rec_rating is not None and p["rating"] is not None else None)
         table.append({
             "Player": p["player_name"] + flag_if_small(p["maps"], MIN_PLAYER_MAPS),
             "Rating": p["rating"],
+            f"Rating L{PLAYER_RECENT_MAPS}": rec_rating,
+            "Rating trend": delta,
             # Per-map spread of the rating, so a steady 1.10 and a swingy 1.10 read
             # differently (item: player consistency). The range is the low-high
             # band; sigma is the standard deviation across maps.
@@ -850,9 +936,12 @@ def render_player_stats(conn, team, window, stage, five_names=None):
         "approximation, since the source stores only the per-map percentage. The "
         "rating range and sigma show per-map spread, so a steady performer and a "
         "feast-or-famine one are distinguishable; sigma needs at least two maps. "
-        f"Maps and rounds are shown so a small sample is visible; {FLAG} marks "
-        f"fewer than {MIN_PLAYER_MAPS} maps. Clutch statistics are not available "
-        "from the data source."
+        f"Rating L{PLAYER_RECENT_MAPS} is the same rating over only the player's "
+        f"last {PLAYER_RECENT_MAPS} maps and the trend is that minus the window "
+        "rating, so a player heating up or cooling off is visible as a direction, "
+        f"not just an average. Maps and rounds are shown so a small sample is "
+        f"visible; {FLAG} marks fewer than {MIN_PLAYER_MAPS} maps. Clutch "
+        "statistics are not available from the data source."
     )
 
 
@@ -876,14 +965,18 @@ def _pvp_side(player):
 
 
 def _team_map_splits(conn, team, window, stage):
-    """Per-map splits for a team keyed by map name, for the win-rate payoff."""
+    """Per-map splits for a team keyed by map name, for the win-rate payoff.
+
+    Non-Valorant junk (the "TBD" placeholder, a null map name) is dropped here so
+    every consumer (veto, duel board, breakdown, aligned) is clear of it (P2).
+    """
     k = _db_key()
     table = stats.per_map_splits(
         cq_map_results(k, conn, team["id"], window, stage),
         cq_rounds(k, conn, team["id"], window, stage),
         team["name"],
     )
-    return {m["map_name"]: m for m in table}
+    return {m["map_name"]: m for m in table if m["map_name"] in veto.CANON_MAPS}
 
 
 def _map_recency(conn, team, window, stage):
@@ -916,14 +1009,18 @@ def _months_ago(date_str):
     return max(0, days // 30)
 
 
-def render_veto_reconstruction(conn, team_a, team_b, window, stage):
+def render_veto_reconstruction(conn, team_a, team_b, window, stage,
+                               current_pool=None, pool_only=False):
     """Reconstruct the likely map pool for the two teams and show map win rates.
 
     Aggregates each team's veto tendencies over the window, infers the active map
     pool, and reconstructs the probable picks, decider, and bans. For the maps
     likely to be played it then surfaces each team's map win rate with attack and
     defense side splits (from Build Step 6). This is built from veto history, not
-    a real upcoming veto, and it makes no claim about who wins the match.
+    a real upcoming veto, and it makes no claim about who wins the match. When the
+    current-pool filter is on, a map that has left rotation is dropped from the
+    reconstruction; when off, it is still marked, so an all-time window does not
+    quietly reconstruct a veto around a map that cannot be played now (P2).
     """
     st.header("Veto and map-pool reconstruction")
     k = _db_key()
@@ -934,8 +1031,12 @@ def render_veto_reconstruction(conn, team_a, team_b, window, stage):
         cq_vetos(k, conn, team_b["id"], window), team_b["tag"], team_b["name"]
     )
     pool = veto.active_pool(a_tend, b_tend)
+    if pool_only and current_pool:
+        pool = [m for m in pool if m in current_pool]
     if not pool:
         st.caption(
+            "No current-rotation maps in the veto history for this range."
+            if pool_only else
             "No veto data stored in this range for these teams. Run the detail "
             "harvest (python harvest.py --pass details) to populate it."
         )
@@ -963,7 +1064,8 @@ def render_veto_reconstruction(conn, team_a, team_b, window, stage):
     for r in rec["rows"]:
         seen = (r["a_appearances"] or 0) + (r["b_appearances"] or 0)
         pool_rows.append({
-            "Map": r["map"] + flag_if_small(seen, MIN_VETO_APPEAR),
+            "Map": r["map"] + rotation_mark(r["map"], current_pool)
+                   + flag_if_small(seen, MIN_VETO_APPEAR),
             "Likely": tags.get(r["map"], "ban"),
             f"{team_a['tag'] or 'A'} pick%": pct(r["a_pick_rate"]),
             f"{team_a['tag'] or 'A'} ban%": pct(r["a_ban_rate"]),
@@ -1658,10 +1760,15 @@ def team_headline(conn, team, window, events, stage, five_names=None):
         "record": f"{rec['wins']}-{rec['losses']}",
         "decided": rec["decided"],
         "win": win,
+        # The won counts ride along so the gap view can build each rate's Wilson
+        # band and say when two teams' bands overlap (the gap is within noise).
+        "win_won": rec["wins"],
         "pistol": pct_num(p["winrate"]),
         "pistol_n": p["total"],
+        "pistol_won": p["won"],
         "opening": pct_num(o["winrate"]),
         "opening_n": o["duels"],
+        "opening_won": o["fk"],
         "rating": stats.team_rating(players),
     }
 
@@ -2267,7 +2374,8 @@ def _map_opp_rank_note(conn, team, window, stage):
     )
 
 
-def render_aligned(conn, team_a, team_b, window, events, stage, five_only):
+def render_aligned(conn, team_a, team_b, window, events, stage, five_only,
+                   current_pool=None, pool_only=False):
     """One shared table per core stat with the gap, instead of two columns.
 
     This is the charter line the side-by-side layout under-delivers: each row shows
@@ -2349,7 +2457,12 @@ def render_aligned(conn, team_a, team_b, window, events, stage, five_only):
     if not a_splits and not b_splits:
         st.caption(DETAIL_EMPTY)
         return
-    names = set(a_splits) | set(b_splits)
+    names = {n for n in (set(a_splits) | set(b_splits))
+             if map_visible(n, current_pool, pool_only)}
+    if not names:
+        st.caption("No current-rotation maps with detail in this range."
+                   if pool_only else DETAIL_EMPTY)
+        return
 
     def plays(splits, name):
         m = splits.get(name)
@@ -2369,7 +2482,8 @@ def render_aligned(conn, team_a, team_b, window, events, stage, five_only):
                 + (bm["rounds_total"] if bm else 0))
         small_flags.append(stats.is_small_sample(seen, MIN_MAP_ROUNDS))
         rows.append({
-            "Map": name + flag_if_small(seen, MIN_MAP_ROUNDS),
+            "Map": name + rotation_mark(name, current_pool)
+                   + flag_if_small(seen, MIN_MAP_ROUNDS),
             f"{a_tag} map%": pct_num(a_win),
             f"{b_tag} map%": pct_num(b_win),
             "Gap (A-B)": gap_str(pct_num(a_win), pct_num(b_win), "%"),
@@ -2502,7 +2616,7 @@ TEAM_SECTIONS = [
 
 
 def render_team(conn, column, team, window, five_only, events, stage, sections,
-                highlight=None):
+                highlight=None, current_pool=None, pool_only=False):
     """Render one team's comparison column, limited to the chosen sections."""
     with column:
         st.header(team["name"])
@@ -2529,7 +2643,8 @@ def render_team(conn, column, team, window, five_only, events, stage, sections,
         if on("Snapshot"):
             render_snapshot(team)
         if on("Map splits"):
-            render_map_splits(conn, team, window, stage, highlight)
+            render_map_splits(conn, team, window, stage, highlight,
+                              current_pool, pool_only)
         if on("Compositions"):
             render_compositions(conn, team, window, stage)
         if on("Pistol"):
@@ -2773,6 +2888,44 @@ def render_map_breakdown(conn, team_a, team_b, window, events, stage):
                 st.caption(f"No head-to-head on {m} in this range.")
 
 
+def render_coverage_strip(conn, team_a, team_b, window, stage):
+    """A compact per-pair data-coverage line for the detail-dependent sections (P1).
+
+    The economy, clutch and other performance, and round win-condition sections
+    only have data where the rich tables were harvested. This says up front, per
+    section, how many maps or matches back it for each team in this window, so the
+    user knows what is answerable here instead of scrolling into empty sections to
+    find out. Meta-honesty about sample, never a figure or a verdict.
+    """
+    k = _db_key()
+    a = cq_rich_coverage(k, conn, team_a["id"], window, stage)
+    b = cq_rich_coverage(k, conn, team_b["id"], window, stage)
+    a_tag, b_tag = team_a["tag"] or "A", team_b["tag"] or "B"
+    rows = [
+        {"Rich section": "Economy (maps)",
+         a_tag: a["economy_maps"], b_tag: b["economy_maps"]},
+        {"Rich section": "Clutches and performance (matches)",
+         a_tag: a["performance_matches"], b_tag: b["performance_matches"]},
+        {"Rich section": "Round win conditions (rounds)",
+         a_tag: a["win_condition_rounds"], b_tag: b["win_condition_rounds"]},
+    ]
+    st.dataframe(pd.DataFrame(rows), hide_index=True)
+    blanks = [r["Rich section"].split(" (")[0]
+              for r in rows if r[a_tag] == 0 or r[b_tag] == 0]
+    if blanks:
+        st.caption(
+            "A 0 means that section will show its empty state for at least one "
+            "team in this window. Thin here: " + ", ".join(blanks) + ". Backfill "
+            "the rich tables with python harvest.py --pass details --redetail "
+            "--since <date> if a section you need is empty."
+        )
+    else:
+        st.caption(
+            "All detail-dependent sections (economy, clutches, win conditions) "
+            "have data for both teams in this window."
+        )
+
+
 def render_context_panel(conn, team_a, team_b, window, events, stage, upcoming=None):
     """The data-honesty flags up front, so a misleading number is caught (item 23).
 
@@ -2892,12 +3045,19 @@ def render_gap_view(conn, team_a, team_b, window, events, stage, five_only,
     a = team_headline(conn, team_a, window, events, stage, five_a)
     b = team_headline(conn, team_b, window, events, stage, five_b)
     a_tag, b_tag = team_a["tag"] or "A", team_b["tag"] or "B"
+    # The win, pistol, and opening rates carry their won/total counts so a Wilson
+    # confidence band can be built for each side and the row tagged when the two
+    # bands overlap (the gap is within sampling noise, not a resolvable edge).
     metrics = [
-        {"metric": "Win %", "a": a["win"], "b": b["win"], "suffix": "%", "dec": 0},
+        {"metric": "Win %", "a": a["win"], "b": b["win"], "suffix": "%", "dec": 0,
+         "a_won": a["win_won"], "a_total": a["decided"],
+         "b_won": b["win_won"], "b_total": b["decided"]},
         {"metric": "Pistol %", "a": a["pistol"], "b": b["pistol"], "suffix": "%",
-         "dec": 0},
+         "dec": 0, "a_won": a["pistol_won"], "a_total": a["pistol_n"],
+         "b_won": b["pistol_won"], "b_total": b["pistol_n"]},
         {"metric": "Opening-duel %", "a": a["opening"], "b": b["opening"],
-         "suffix": "%", "dec": 0},
+         "suffix": "%", "dec": 0, "a_won": a["opening_won"], "a_total": a["opening_n"],
+         "b_won": b["opening_won"], "b_total": b["opening_n"]},
         {"metric": "Team rating", "a": a["rating"], "b": b["rating"], "suffix": "",
          "dec": 2},
     ]
@@ -2906,26 +3066,47 @@ def render_gap_view(conn, team_a, team_b, window, events, stage, five_only,
     metrics.extend(_map_side_edges(conn, team_a, team_b, window, stage, pool))
     ranked = stats.rank_metric_gaps(metrics)
     rows = []
+    any_noise = False
     for r in ranked:
         dec = r["dec"]
         fmt = pct100 if dec == 0 else num2
         leads = a_tag if r["leader"] == "a" else (
             b_tag if r["leader"] == "b" else "even")
+        # When both sides carry a count, judge whether the gap is distinguishable
+        # from noise by overlapping their Wilson bands. A blank cell means the row
+        # has no count to build a band from (the rating, the map and side edges).
+        overlap = None
+        if "a_total" in r:
+            overlap = stats.bands_overlap(
+                r["a_won"], r["a_total"], r["b_won"], r["b_total"])
+        if overlap:
+            any_noise = True
         rows.append({
             "Metric": r["metric"],
             a_tag: fmt(r["a"]),
             b_tag: fmt(r["b"]),
             "Gap (A-B)": gap_str(r["a"], r["b"], r["suffix"], dec),
             "Leads": leads,
+            # Only the overlap case is tagged; a blank means either the gap is
+            # distinguishable or the row carries no sample to band (rating, edges).
+            "Within noise": "bands overlap" if overlap else "",
         })
     st.dataframe(pd.DataFrame(rows), hide_index=True)
+    noise_note = (
+        " A row tagged \"bands overlap\" has the two teams' 95% confidence bands "
+        "crossing, so that gap is within sampling noise and should not be read as "
+        "a real edge."
+        if any_noise else
+        " The \"within noise\" column tags a gap whose two confidence bands cross "
+        "as not distinguishable; none did here."
+    )
     st.caption(
         "Sorted by the size of the gap, biggest first, so what separates the "
         "teams sits on top and the near-ties at the bottom. Team-level figures sit "
         "alongside the largest map and side edges (cross-side duels on the likely "
         f"maps, over a real sample of at least {MIN_MAP_ROUNDS} rounds). The Leads "
         "column marks which team is higher on that one row; it is not a tally and "
-        "never counts who leads more rows or calls a match winner."
+        "never counts who leads more rows or calls a match winner." + noise_note
     )
 
 
@@ -2970,6 +3151,67 @@ def _detect_upcoming(team_a, team_b):
             return {"match_date": match_date, "event_name": event,
                     "is_lan": is_lan_event(event)}
     return None
+
+
+def render_upcoming_schedule(conn, teams):
+    """List scheduled franchise matches and load one into the comparison (P5).
+
+    The whole job is predicting an upcoming match, yet the user otherwise picks
+    both teams by hand. This pulls the live upcoming-matches feed (behind a button,
+    since it needs the API up), keeps the franchise-versus-franchise meetings, and
+    on a click loads that pair into the comparison and tags the date, event, and
+    LAN flag, so the tool can be opened against this week's slate. A navigation
+    convenience over the manual picker; it produces no judged output.
+    """
+    st.subheader("Upcoming franchise matches")
+    if st.button(
+        "Load the schedule from the API",
+        help="Pull the live upcoming-matches feed and keep the franchise-versus-"
+             "franchise meetings. Needs vlrggapi running.",
+    ):
+        try:
+            from valtrack.api_client import VlrClient
+            st.session_state["upcoming_segments"] = (
+                VlrClient(request_delay=0).upcoming_matches())
+        except Exception as exc:  # API down or unreachable: say so, keep manual flow.
+            st.session_state.pop("upcoming_segments", None)
+            st.warning(
+                f"Could not reach the upcoming-matches API ({exc}). Start vlrggapi "
+                "(python main.py in the vlrggapi folder) and try again.")
+
+    segments = st.session_state.get("upcoming_segments")
+    if segments is None:
+        st.caption(
+            "Click to pull the scheduled franchise-versus-franchise matches from "
+            "the live feed and load one into the comparison in a click.")
+        return
+    pairs = schedule.franchise_upcoming(segments, teams)
+    if not pairs:
+        st.caption(
+            "No franchise-versus-franchise matches are listed in the feed right "
+            "now. Pick the two teams by hand, or check back closer to a match day.")
+        return
+    id_to_index = {t["id"]: i for i, t in enumerate(teams)}
+    for i, p in enumerate(pairs):
+        date_str = p["match_date"] or "date TBD"
+        env = "LAN" if p["is_lan"] else "online/unknown"
+        event = f" - {p['event']}" if p["event"] else ""
+        left, right = st.columns([4, 1])
+        left.write(
+            f"**{p['a']['name']}** vs **{p['b']['name']}**  ({date_str}{event}, "
+            f"{env})")
+        if right.button("Load", key=f"sched_load_{i}"):
+            st.session_state["team_a"] = id_to_index[p["a"]["id"]]
+            st.session_state["team_b"] = id_to_index[p["b"]["id"]]
+            journal.save_upcoming(
+                conn, p["a"]["id"], p["b"]["id"], p["match_date"] or "",
+                p["event"], p["is_lan"])
+            st.rerun()
+    st.caption(
+        "Scheduled meetings from the live feed. Loading one selects the pair and "
+        "tags the date, event, and LAN flag; the series format is only known once "
+        "the match is played. Team names are matched to the franchise list, so a "
+        "rare mismatch can drop a real meeting.")
 
 
 def render_upcoming_tag(conn, team_a, team_b):
@@ -3030,13 +3272,42 @@ def render_upcoming_tag(conn, team_a, team_b):
     return current
 
 
+def _adaptive_recent_window(conn, team_a, team_b, events, stage):
+    """A recent dashboard window, widened from 3 to 6 months when it is too thin (P6).
+
+    The dashboard defaults to the last 3 months, but for a team between events
+    that can be only a handful of matches, so the headline figures sit under the
+    small-sample floor and read as noise without the user choosing that. When
+    either team has fewer than MIN_MATCHES decided in the last 3 months, this
+    widens to 6 months and returns a note saying so, rather than silently showing
+    a thin window. The manual range control is untouched.
+
+    Returns (window, note).
+    """
+    k = _db_key()
+    today = dt.date.today()
+    w90 = DateWindow(today - dt.timedelta(days=90), today)
+    a90 = cq_record(k, conn, team_a["id"], w90, events, stage)["decided"]
+    b90 = cq_record(k, conn, team_b["id"], w90, events, stage)["decided"]
+    if min(a90, b90) < MIN_MATCHES:
+        return (
+            DateWindow(today - dt.timedelta(days=180), today),
+            f"Widened to the last 6 months: the last 3 months held only {a90} and "
+            f"{b90} decided matches for the two teams (under the {MIN_MATCHES}-match "
+            "floor), so a 3-month default would read as noise. Turn off the recent "
+            "toggle to use the range selected above.",
+        )
+    return w90, "Last 3 months."
+
+
 def render_prematch_dashboard(conn, team_a, team_b, window, events, stage, five_only):
     """A matchup-first briefing assembled in the order a predictor reasons (item 21).
 
     A compact matchup card, then the map duel board, the context flags, and the
     biggest-difference view. Defaults to a recent window since all-time spans
-    rosters and metas (item 25), with one click back to the selected range. It
-    presents differences and context only, never a rating or a who-wins call.
+    rosters and metas (item 25), with one click back to the selected range, and
+    widens that recent window when 3 months is too thin (P6). It presents
+    differences and context only, never a rating or a who-wins call.
     """
     st.caption(
         "A matchup-first view: the card, the maps, the honesty flags, and the "
@@ -3046,19 +3317,23 @@ def render_prematch_dashboard(conn, team_a, team_b, window, events, stage, five_
     upcoming = render_upcoming_tag(conn, team_a, team_b)
 
     use_recent = st.checkbox(
-        "Use the last 3 months for this view", value=True, key="dash_recent",
+        "Use a recent window for this view", value=True, key="dash_recent",
         help=(
             "All-time data spans roster changes and old metas, which is the wrong "
             "default for a prediction. This narrows the dashboard to a recent "
-            "window; turn it off to use the range selected above."
+            "window (3 months, widened to 6 when that is too thin); turn it off to "
+            "use the range selected above."
         ),
     )
     if use_recent:
-        dash_window = DateWindow(
-            dt.date.today() - dt.timedelta(days=90), dt.date.today())
+        dash_window, recent_note = _adaptive_recent_window(
+            conn, team_a, team_b, events, stage)
+        st.caption(recent_note)
     else:
         dash_window = window
 
+    st.divider()
+    render_coverage_strip(conn, team_a, team_b, dash_window, stage)
     st.divider()
     card_left, card_right = st.columns(2)
     for col, team in ((card_left, team_a), (card_right, team_b)):
@@ -3315,7 +3590,8 @@ def _swap_teams():
 # current-five toggle, palette, section picker, and league filter back to default.
 _RESET_KEYS = (
     "team_a", "team_b", "dwmode", "dwrange", "env", "stage", "view", "five",
-    "sections", "palette", "leagues_filter", "dash_recent", "_url_seeded",
+    "pool_only", "sections", "palette", "leagues_filter", "dash_recent",
+    "_url_seeded",
 )
 
 
@@ -3425,6 +3701,17 @@ def main():
                 "be reassigned to the current roster."
             ),
         )
+        pool_only = st.checkbox(
+            "Current map pool only (map tables and veto)",
+            key="pool_only",
+            help=(
+                "Hides maps that have left the current rotation (derived from the "
+                "last 90 days of play across all teams) from the map tables and the "
+                "veto reconstruction, so an all-time window does not surface a map "
+                "that cannot be played now. Off by default; when off, an "
+                "out-of-rotation map is marked rather than hidden."
+            ),
+        )
         env = st.radio(
             "Event type",
             ENV_MODES,
@@ -3498,12 +3785,17 @@ def main():
         # The likely-played pool, computed once, so the map tables can mark the
         # relevant maps (item 20) consistently with the veto reconstruction.
         highlight = set(_likely_pool(conn, team_a, team_b, window) or [])
+        # The de-facto current rotation, for the map-pool guardrail (P2). Empty
+        # when the database has no recent maps, in which case the filter no-ops.
+        current_pool = set(cq_map_pool(_db_key(), conn))
 
         st.divider()
         tab_dash, tab_teams, tab_matchup, tab_notes = st.tabs(
             ["Pre-match", "Team comparison", "Matchup", "Notes and log"]
         )
         with tab_dash:
+            render_upcoming_schedule(conn, teams)
+            st.divider()
             render_prematch_dashboard(
                 conn, team_a, team_b, window, events, stage, five_only)
         with tab_teams:
@@ -3527,7 +3819,8 @@ def main():
                     "Jump to: [Core figures](#core-figures-aligned) | "
                     "[Map and side splits](#per-map-and-side-win-rates-aligned)"
                 )
-                render_aligned(conn, team_a, team_b, window, events, stage, five_only)
+                render_aligned(conn, team_a, team_b, window, events, stage,
+                               five_only, current_pool, pool_only)
             else:
                 sections = st.multiselect(
                     "Sections to show", TEAM_SECTIONS, default=TEAM_SECTIONS,
@@ -3536,9 +3829,9 @@ def main():
                 )
                 show_left, show_right = st.columns(2)
                 render_team(conn, show_left, team_a, window, five_only, events,
-                            stage, sections, highlight)
+                            stage, sections, highlight, current_pool, pool_only)
                 render_team(conn, show_right, team_b, window, five_only, events,
-                            stage, sections, highlight)
+                            stage, sections, highlight, current_pool, pool_only)
         with tab_matchup:
             # A small jump-to-section nav (item 16). Streamlit auto-anchors each
             # subheader from its text, so these links scroll to them.
@@ -3549,7 +3842,8 @@ def main():
                 "[Player vs player](#player-versus-player) | "
                 "[Common opponents](#common-opponents)"
             )
-            render_veto_reconstruction(conn, team_a, team_b, window, stage)
+            render_veto_reconstruction(conn, team_a, team_b, window, stage,
+                                       current_pool, pool_only)
             render_map_breakdown(conn, team_a, team_b, window, events, stage)
             render_head_to_head(conn, team_a, team_b, window, events, stage)
             render_player_vs_player(conn, team_a, team_b, window, stage, five_only)

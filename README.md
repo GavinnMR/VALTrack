@@ -192,6 +192,21 @@ vetos) for every match and is the slow one, potentially several hours. Both are
 safe to stop and re-run: they resume where they left off and never reload what is
 already stored. Run Python with `-u` if you want the progress lines to stream.
 
+If a database was detailed before the per-map economy and series-performance
+tables existed, those rich sections (economy, clutches, multikills, plants and
+defuses, round win conditions) stay empty on the older matches. A bounded
+re-detail backfills them without re-fetching the whole table. Keep it to a recent
+window, since a scout does not need years-old economy:
+
+```
+.venv/Scripts/python harvest.py --pass details --redetail --since 2025-01-01
+```
+
+This re-fetches only the matches in range that are missing those tables (plus any
+brand-new match), and is safe to stop and re-run like the other passes. Going
+forward, the in-app refresh fills the rich tables for new matches automatically,
+as long as the running vlrggapi has the clone patches applied.
+
 ## Running the app
 
 The simplest way starts the data source and the app together:
