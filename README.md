@@ -232,19 +232,3 @@ only matches newer than the last update and details the newest of them. It never
 runs the full all-time harvest. A banner reports data freshness, with one state
 when the stored data is getting old and another when the last refresh attempt
 failed, which usually means the API is not running.
-
-## Development
-
-Run the tests with the VALTrack environment:
-
-```
-.venv/Scripts/python -m pytest tests/
-```
-
-The aggregation logic (side splits, pistol and opening-duel rates, player
-aggregates and the per-map split, series pressure, map-pool overlap, veto
-reconstruction including the picked-by cross-check, buy-type economy conversion,
-clutch and multikill and plant/defuse counts, and round win conditions) is unit
-tested, since an error there would quietly corrupt the comparison. A hermetic test
-also boots the app against a small seeded database and exercises the views and
-toggles. The UI itself is verified by hand.
