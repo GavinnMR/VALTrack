@@ -393,7 +393,6 @@ def choose_window(conn, team_a_id=None, team_b_id=None):
     mode = st.radio(
         "Date range",
         WINDOW_MODES,
-        horizontal=True,
         key="dwmode",
         help=(
             "Windowed figures (record, recent matches, form and streak, and the "
@@ -2615,9 +2614,22 @@ TEAM_SECTIONS = [
 ]
 
 
+# The sections opened by default in the side-by-side column. The rest start
+# collapsed so the column is a navigable list of headers rather than a long
+# scroll; the user expands the deeper reads (multikills, utility, player-by-map)
+# only when wanted.
+DEFAULT_OPEN_SECTIONS = {
+    "Record and form", "Map splits", "Player stats", "Recent matches",
+}
+
+
 def render_team(conn, column, team, window, five_only, events, stage, sections,
                 highlight=None, current_pool=None, pool_only=False):
-    """Render one team's comparison column, limited to the chosen sections."""
+    """Render one team's comparison column, limited to the chosen sections.
+
+    Each section sits in a collapsible expander so the column reads as a short
+    list of headers; the heavy reads start collapsed and open on demand.
+    """
     with column:
         st.header(team["name"])
         subtitle = team["league"].capitalize()
@@ -2635,46 +2647,41 @@ def render_team(conn, column, team, window, five_only, events, stage, sections,
         five_names = current_five_set(conn, team) if five_only else None
         render_lineup_continuity(conn, team, window, stage)
 
-        def on(name):
-            return name in sections
-
-        if on("Record and form"):
-            render_record_and_form(conn, team, window, events, stage)
-        if on("Snapshot"):
-            render_snapshot(team)
-        if on("Map splits"):
-            render_map_splits(conn, team, window, stage, highlight,
-                              current_pool, pool_only)
-        if on("Compositions"):
-            render_compositions(conn, team, window, stage)
-        if on("Pistol"):
-            render_pistol(conn, team, window, stage)
-        if on("Economy"):
-            render_economy(conn, team, window, stage)
-        if on("Win conditions"):
-            render_win_conditions(conn, team, window, stage)
-        if on("Opening duels"):
-            render_opening(conn, team, window, stage, five_names)
-        if on("Player stats"):
-            render_player_stats(conn, team, window, stage, five_names)
-        if on("Player by map"):
-            render_player_map_performance(conn, team, window, stage, five_names)
-        if on("Clutches"):
-            render_clutch(conn, team, window, stage, five_names)
-        if on("Multikills"):
-            render_multikills(conn, team, window, stage, five_names)
-        if on("Plants and defuses"):
-            render_utility(conn, team, window, stage, five_names)
-        if on("Series pressure"):
-            render_pressure(conn, team, window, stage)
-        if on("Recent vs window"):
-            render_recent_vs_window(conn, team, window, events, stage, five_names)
-        if on("Roster timeline"):
-            render_roster_timeline(conn, team, window, stage)
-        if on("Recent matches"):
-            render_recent(conn, team, window, events, stage)
-        if on("Roster"):
-            render_roster(conn, team)
+        # name -> the render call for that section, run inside its expander.
+        renderers = {
+            "Record and form": lambda: render_record_and_form(
+                conn, team, window, events, stage),
+            "Snapshot": lambda: render_snapshot(team),
+            "Map splits": lambda: render_map_splits(
+                conn, team, window, stage, highlight, current_pool, pool_only),
+            "Compositions": lambda: render_compositions(conn, team, window, stage),
+            "Pistol": lambda: render_pistol(conn, team, window, stage),
+            "Economy": lambda: render_economy(conn, team, window, stage),
+            "Win conditions": lambda: render_win_conditions(conn, team, window, stage),
+            "Opening duels": lambda: render_opening(
+                conn, team, window, stage, five_names),
+            "Player stats": lambda: render_player_stats(
+                conn, team, window, stage, five_names),
+            "Player by map": lambda: render_player_map_performance(
+                conn, team, window, stage, five_names),
+            "Clutches": lambda: render_clutch(conn, team, window, stage, five_names),
+            "Multikills": lambda: render_multikills(
+                conn, team, window, stage, five_names),
+            "Plants and defuses": lambda: render_utility(
+                conn, team, window, stage, five_names),
+            "Series pressure": lambda: render_pressure(conn, team, window, stage),
+            "Recent vs window": lambda: render_recent_vs_window(
+                conn, team, window, events, stage, five_names),
+            "Roster timeline": lambda: render_roster_timeline(
+                conn, team, window, stage),
+            "Recent matches": lambda: render_recent(conn, team, window, events, stage),
+            "Roster": lambda: render_roster(conn, team),
+        }
+        # Walk TEAM_SECTIONS so the order stays fixed regardless of pick order.
+        for name in TEAM_SECTIONS:
+            if name in sections:
+                with st.expander(name, expanded=name in DEFAULT_OPEN_SECTIONS):
+                    renderers[name]()
 
 
 def _likely_pool(conn, team_a, team_b, window):
@@ -3413,6 +3420,80 @@ def render_sticky_header(team_a, team_b):
     )
 
 
+def render_matchup_banner(team_a, team_b, summary):
+    """A real two-team header for the main pane: logos, names, active filters.
+
+    With the global controls moved to the sidebar, the main area opens on this so
+    the user always sees which two teams and which window or filters are in effect
+    without scrolling back up to the controls.
+    """
+    c1, c2, c3 = st.columns([1, 6, 1])
+    with c1:
+        if team_a["logo"]:
+            st.image(team_a["logo"], width=56)
+    with c2:
+        a = f"{team_a['name']} ({team_a['tag']})" if team_a["tag"] else team_a["name"]
+        b = f"{team_b['name']} ({team_b['tag']})" if team_b["tag"] else team_b["name"]
+        st.markdown(f"## {a} &nbsp;vs&nbsp; {b}")
+        st.caption(summary)
+    with c3:
+        if team_b["logo"]:
+            st.image(team_b["logo"], width=56)
+
+
+def render_headline_gap_bars(conn, team_a, team_b, window, events, stage, five_only):
+    """Lead with the answer: the headline gaps as a quick diverging bar read.
+
+    Three comparable rates (win, pistol, opening duel) as horizontal bars of the A
+    minus B gap, so the eye catches where the teams separate before scrolling into
+    the detail. A bar's direction and color mark which side is higher on that one
+    statistic, the same per-row leader cue used elsewhere; it is never a tally and
+    calls no winner.
+    """
+    five_a = current_five_set(conn, team_a) if five_only else None
+    five_b = current_five_set(conn, team_b) if five_only else None
+    a = team_headline(conn, team_a, window, events, stage, five_a)
+    b = team_headline(conn, team_b, window, events, stage, five_b)
+    pal = palette()
+    a_tag, b_tag = team_a["tag"] or "A", team_b["tag"] or "B"
+
+    labels, gaps, colors, texts = [], [], [], []
+    for label, key in (("Win %", "win"), ("Pistol %", "pistol"),
+                       ("Opening-duel %", "opening")):
+        av, bv = a.get(key), b.get(key)
+        if av is None or bv is None:
+            continue
+        gap = av - bv
+        leader = a_tag if gap > 0 else (b_tag if gap < 0 else "even")
+        labels.append(label)
+        gaps.append(gap)
+        colors.append(pal["good"] if gap >= 0 else pal["bad"])
+        texts.append(f"{gap:+.0f} ({leader})")
+
+    if not labels:
+        st.caption(
+            "Not enough detailed data in this range for the headline gap bars.")
+        return
+
+    fig = go.Figure(go.Bar(
+        x=gaps, y=labels, orientation="h", marker_color=colors,
+        text=texts, textposition="outside", cliponaxis=False,
+    ))
+    fig.add_vline(x=0, line_width=1, line_color="#888")
+    fig.update_layout(
+        height=180, margin=dict(l=10, r=10, t=10, b=10),
+        xaxis_title=f"{a_tag} minus {b_tag} (percentage points)",
+        showlegend=False,
+    )
+    st.plotly_chart(fig, width="stretch", key="headline_gap_bars")
+    st.caption(
+        f"Each bar is one statistic's gap, {a_tag} minus {b_tag}, in percentage "
+        f"points. A bar to the right means {a_tag} is higher on that stat, to the "
+        f"left means {b_tag}. This marks the per-statistic leader only; it is not a "
+        "tally and calls no winner."
+    )
+
+
 def run_incremental_refresh():
     """Pull new matches since the last update and detail the newest of them.
 
@@ -3463,28 +3544,25 @@ def render_freshness(conn):
     last_updated = db.get_meta(conn, "last_updated")
     age = freshness.age_days(last_updated)
 
-    left, right = st.columns([1, 4])
-    with left:
-        if st.button("Refresh data", help="Incremental update, not the full harvest."):
-            run_incremental_refresh()
-    with right:
-        if last_status == "failed":
-            st.error(
-                "The most recent refresh attempt failed, so the data API may be "
-                "down. The stored data still works for viewing."
-            )
-        elif age is None:
-            st.warning("No refresh recorded yet. Click Refresh to pull new matches.")
-        elif age >= STALE_REFRESH_DAYS:
-            st.warning(
-                f"Stored data was last updated {age:.0f} days ago. Click Refresh "
-                "to pull newer matches."
-            )
-        else:
-            note = f"Data updated {age:.0f} days ago."
-            if last_status == "partial":
-                note += " The last refresh finished with some errors."
-            st.caption(note)
+    if st.button("Refresh data", help="Incremental update, not the full harvest."):
+        run_incremental_refresh()
+    if last_status == "failed":
+        st.error(
+            "The most recent refresh attempt failed, so the data API may be "
+            "down. The stored data still works for viewing."
+        )
+    elif age is None:
+        st.warning("No refresh recorded yet. Click Refresh to pull new matches.")
+    elif age >= STALE_REFRESH_DAYS:
+        st.warning(
+            f"Stored data was last updated {age:.0f} days ago. Click Refresh "
+            "to pull newer matches."
+        )
+    else:
+        note = f"Data updated {age:.0f} days ago."
+        if last_status == "partial":
+            note += " The last refresh finished with some errors."
+        st.caption(note)
 
 
 WINDOW_MODES = ["All time", "Last 3 months", "Last 6 months", "Year to date",
@@ -3492,7 +3570,10 @@ WINDOW_MODES = ["All time", "Last 3 months", "Last 6 months", "Year to date",
                 "Custom range"]
 ENV_MODES = ["All", "International LAN", "Online/other"]
 STAGE_MODES = ["All", "Group / swiss", "Playoff / elimination"]
-VIEW_MODES = ["Side by side", "Aligned"]
+# Aligned is the default: one shared row per stat with the gap is what a
+# comparison actually wants, and unlike side by side the rows never drift out of
+# vertical alignment as the two columns grow to different lengths.
+VIEW_MODES = ["Aligned", "Side by side"]
 
 
 def _apply_url_state(teams):
@@ -3560,7 +3641,7 @@ def _write_url_state(teams, a, b):
         "win": st.session_state.get("dwmode", "All time"),
         "env": st.session_state.get("env", "All"),
         "stage": st.session_state.get("stage", "All"),
-        "view": st.session_state.get("view", "Side by side"),
+        "view": st.session_state.get("view", "Aligned"),
         "five": "1" if st.session_state.get("five") else "0",
         "pal": st.session_state.get("palette", DEFAULT_PALETTE),
     }
@@ -3619,9 +3700,6 @@ def main():
     db.ensure_columns(conn)  # self-heal an older database missing newer columns
     db.backfill_match_stage(conn)  # classify any match missing a stage label
     try:
-        render_freshness(conn)
-        st.divider()
-
         teams = queries.list_teams(conn)
         if len(teams) < 2:
             st.warning("The database holds fewer than two teams. Run the harvest first.")
@@ -3635,40 +3713,47 @@ def main():
         st.session_state.setdefault("team_b", min(1, len(teams) - 1))
         labels = [team_label(t) for t in teams]
 
-        # League filter for the pickers (item 10). The list is already grouped by
-        # league (list_teams orders by league then rank), and this narrows both
-        # pickers to the chosen leagues. The options stay indices into the full
-        # team list so swap and the URL state are unaffected; a pick that falls
-        # outside the filter is snapped back to a valid option first.
-        present = sorted({t["league"] for t in teams})
-        leagues = st.multiselect(
-            "Leagues", present, default=present, key="leagues_filter",
-            format_func=lambda lg: lg.capitalize(),
-            help="Filter both team pickers by league. Teams are grouped by league.",
-        )
-        allowed = set(leagues) if leagues else set(present)
-        opts = [i for i in range(len(teams)) if teams[i]["league"] in allowed]
-        if st.session_state.get("team_a") not in opts:
-            st.session_state["team_a"] = opts[0]
-        if st.session_state.get("team_b") not in opts:
-            st.session_state["team_b"] = opts[-1]
+        # Every global control lives in the sidebar, so the main pane opens on the
+        # comparison rather than a stack of filters. The widget keys are unchanged,
+        # so the URL state, the swap callback, and the saved links all still work.
+        with st.sidebar:
+            st.header("Data")
+            render_freshness(conn)
 
-        pick_left, pick_right = st.columns(2)
-        with pick_left:
+            st.header("Teams")
+            # League filter for the pickers (item 10). The options stay indices
+            # into the full team list so swap and the URL state are unaffected; a
+            # pick outside the filter is snapped back to a valid option first.
+            present = sorted({t["league"] for t in teams})
+            leagues = st.multiselect(
+                "Leagues", present, default=present, key="leagues_filter",
+                format_func=lambda lg: lg.capitalize(),
+                help="Filter both team pickers by league. Teams are grouped by league.",
+            )
+            allowed = set(leagues) if leagues else set(present)
+            opts = [i for i in range(len(teams)) if teams[i]["league"] in allowed]
+            if len(opts) < 2:
+                st.warning(
+                    "Pick at least two leagues so two different teams are available.")
+                return
+            if st.session_state.get("team_a") not in opts:
+                st.session_state["team_a"] = opts[0]
             a = st.selectbox(
                 "Team A", opts, format_func=lambda k: labels[k], key="team_a",
             )
-        with pick_right:
+            # Team B's options exclude A, so the same team cannot be chosen twice
+            # and the old "pick two different teams" warning is no longer reachable.
+            opts_b = [i for i in opts if i != a]
+            if st.session_state.get("team_b") not in opts_b:
+                st.session_state["team_b"] = opts_b[0]
             b = st.selectbox(
-                "Team B", opts, format_func=lambda k: labels[k], key="team_b",
+                "Team B", opts_b, format_func=lambda k: labels[k], key="team_b",
             )
-        ctrl_swap, ctrl_fav, ctrl_reset, ctrl_pal = st.columns([1, 1, 1, 2])
-        with ctrl_swap:
+
             st.button(
                 "Swap A and B", on_click=_swap_teams,
                 help="Flip which team sits on the left without re-picking both.",
             )
-        with ctrl_fav:
             saved = journal.is_favorite(conn, teams[a]["id"], teams[b]["id"])
             if saved:
                 if st.button("★ Saved", help="Remove from saved matchups."):
@@ -3679,98 +3764,72 @@ def main():
                     conn, teams[a]["id"], teams[a]["name"],
                     teams[b]["id"], teams[b]["name"])
                 st.rerun()
-        with ctrl_reset:
             st.button(
                 "Reset view", on_click=_reset_view,
                 help="Clear the range, filters, and toggles back to default.",
             )
-        with ctrl_pal:
+
+            st.header("Filters")
+            window = choose_window(conn, teams[a]["id"], teams[b]["id"])
+            five_only = st.checkbox(
+                "Current five only (player figures)",
+                key="five",
+                help=(
+                    "Narrows the player statistics, opening duels, and player-"
+                    "versus-player view to each team's current five. Team, map, and "
+                    "round figures stay over everyone who played, since a past round "
+                    "cannot be reassigned to the current roster."
+                ),
+            )
+            pool_only = st.checkbox(
+                "Current map pool only (map tables and veto)",
+                key="pool_only",
+                help=(
+                    "Hides maps that have left the current rotation (derived from "
+                    "the last 90 days of play across all teams) from the map tables "
+                    "and the veto reconstruction. Off by default; when off, an "
+                    "out-of-rotation map is marked rather than hidden."
+                ),
+            )
+            env = st.radio(
+                "Event type",
+                ENV_MODES,
+                horizontal=True,
+                key="env",
+                help=(
+                    "LAN versus online is inferred from event names, so it is best-"
+                    "effort. It narrows the match-level figures: record, form, and "
+                    "recent matches. Matches without detail have an unknown "
+                    "environment and count only under All. LAN and Online cover only "
+                    "matches whose event is known."
+                ),
+            )
+            events = EventFilter(
+                {"All": "all", "International LAN": "lan",
+                 "Online/other": "online"}[env]
+            )
+            stage_label = st.radio(
+                "Stage",
+                STAGE_MODES,
+                horizontal=True,
+                key="stage",
+                help=(
+                    "Group/swiss versus playoff/elimination, classified from the "
+                    "bracket round label, so it is best-effort. It narrows every "
+                    "windowed figure. A match whose round label cannot be placed is "
+                    "left out of both stages and counted only under All, so the two "
+                    "stages need not sum to the All total."
+                ),
+            )
+            stage = StageFilter(
+                {"All": "all", "Group / swiss": "group",
+                 "Playoff / elimination": "playoff"}[stage_label]
+            )
+
+            st.divider()
             st.selectbox(
                 "Color palette", list(PALETTES), key="palette",
                 help="Colorblind-safe swaps the green/red cues for blue/orange.",
-            )
-
-        window = choose_window(conn, teams[a]["id"], teams[b]["id"])
-        five_only = st.checkbox(
-            "Current five only (player figures)",
-            key="five",
-            help=(
-                "Narrows the player statistics, opening duels, and player-versus-"
-                "player view to each team's current five. Team, map, and round "
-                "figures stay over everyone who played, since a past round cannot "
-                "be reassigned to the current roster."
-            ),
-        )
-        pool_only = st.checkbox(
-            "Current map pool only (map tables and veto)",
-            key="pool_only",
-            help=(
-                "Hides maps that have left the current rotation (derived from the "
-                "last 90 days of play across all teams) from the map tables and the "
-                "veto reconstruction, so an all-time window does not surface a map "
-                "that cannot be played now. Off by default; when off, an "
-                "out-of-rotation map is marked rather than hidden."
-            ),
-        )
-        env = st.radio(
-            "Event type",
-            ENV_MODES,
-            horizontal=True,
-            key="env",
-            help=(
-                "LAN versus online is inferred from event names, so it is best-"
-                "effort. It narrows the match-level figures: record, form, and "
-                "recent matches. The event name comes from the per-match detail, "
-                "so a match without detail has an unknown environment and is "
-                "counted only under All, not LAN or Online."
-            ),
-        )
-        events = EventFilter(
-            {"All": "all", "International LAN": "lan", "Online/other": "online"}[env]
-        )
-        if env != "All":
-            st.caption(
-                "LAN and Online cover only matches whose event is known (those "
-                "with per-match detail harvested). As the detail harvest fills "
-                "in, this split covers more matches."
-            )
-
-        stage_label = st.radio(
-            "Stage",
-            STAGE_MODES,
-            horizontal=True,
-            key="stage",
-            help=(
-                "Group/swiss versus playoff/elimination, classified from the "
-                "bracket round label, so it is best-effort. It narrows every "
-                "windowed figure, including the map and side splits, to that stage "
-                "of play. A match whose round label cannot be placed is left out of "
-                "both stages and counted only under All."
-            ),
-        )
-        stage = StageFilter(
-            {"All": "all", "Group / swiss": "group",
-             "Playoff / elimination": "playoff"}[stage_label]
-        )
-        if stage_label != "All":
-            st.caption(
-                "Group/swiss and playoff/elimination cover only matches whose "
-                "round label could be classified; ambiguous labels are left out of "
-                "both, so the two stages need not sum to the All total."
-            )
-
-        mn, mx = queries.match_date_bounds(conn)
-        if window.is_all_time:
-            span_start, span_end = mn, mx
-        else:
-            span_start = window.start.isoformat() if window.start else mn
-            span_end = window.end.isoformat() if window.end else mx
-        span = eras.patch_era_span(span_start, span_end)
-        if span:
-            st.info(
-                f"Patch era (rough): the displayed data spans {span}. Older data "
-                "may reflect different maps, agents, and metas, so read across a "
-                "wide range with care."
             )
 
         team_a = queries.get_team(conn, teams[a]["id"])
@@ -3780,6 +3839,32 @@ def main():
             return
 
         _write_url_state(teams, a, b)
+
+        # A real two-team banner with the active-filter summary, so the main pane
+        # always says which teams and which filters are in effect now that the
+        # controls live off to the side.
+        five_txt = "current five" if five_only else "all players"
+        pool_txt = "current pool" if pool_only else "all maps"
+        summary = (
+            f"Window: {st.session_state.get('dwmode', 'All time')}  ·  "
+            f"Event: {env}  ·  Stage: {stage_label}  ·  "
+            f"Players: {five_txt}  ·  Maps: {pool_txt}"
+        )
+        render_matchup_banner(team_a, team_b, summary)
+
+        mn, mx = queries.match_date_bounds(conn)
+        if window.is_all_time:
+            span_start, span_end = mn, mx
+        else:
+            span_start = window.start.isoformat() if window.start else mn
+            span_end = window.end.isoformat() if window.end else mx
+        span = eras.patch_era_span(span_start, span_end)
+        if span:
+            st.caption(
+                f"Patch era (rough): the displayed data spans {span}. Older data "
+                "may reflect different maps, agents, and metas, so read across a "
+                "wide range with care."
+            )
 
         render_sticky_header(team_a, team_b)
         # The likely-played pool, computed once, so the map tables can mark the
@@ -3799,18 +3884,22 @@ def main():
             render_prematch_dashboard(
                 conn, team_a, team_b, window, events, stage, five_only)
         with tab_teams:
-            view = st.radio(
-                "View", VIEW_MODES, horizontal=True, key="view",
-                help=(
-                    "Side by side shows each team's full column. Aligned shows one "
-                    "shared table per stat with the gap between the teams."
-                ),
-            )
+            # Lead with the answer: a quick visual of the headline gaps, then the
+            # compact aligned strip, before the detailed sections below.
+            render_headline_gap_bars(
+                conn, team_a, team_b, window, events, stage, five_only)
             render_comparison_strip(
                 conn, team_a, team_b, window, events, stage, five_only)
             render_league_reference(conn, teams, team_a, team_b, window, events, stage)
             render_glossary()
             st.divider()
+            view = st.radio(
+                "View", VIEW_MODES, horizontal=True, key="view",
+                help=(
+                    "Aligned shows one shared table per stat with the gap between "
+                    "the teams. Side by side shows each team's full column."
+                ),
+            )
             if view == "Aligned":
                 # Jump-to-section nav (item v4.4). Only the aligned view has unique
                 # subheader anchors; the side-by-side view duplicates them across
