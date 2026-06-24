@@ -67,6 +67,40 @@ def test_team_tendencies_drops_non_map_junk():
     assert set(out) == {"Bind"}
 
 
+def _pick_row(match_id, token, map_name, picked_by_name=None):
+    return {"match_id": match_id, "team_token": token, "action": "pick",
+            "map_name": map_name, "picked_by_name": picked_by_name}
+
+
+def test_team_tendencies_picked_by_recovers_unresolved_token():
+    # The veto token is junk (a mangled multi-word name), so tag matching fails,
+    # but the played map's picked_by_name names the team, so the pick still counts.
+    rows = [_pick_row(1, "garbage token", "Bind", picked_by_name="Paper Rex")]
+    out = team_tendencies(rows, "PRX", team_name="Paper Rex")
+    assert out["Bind"]["picks"] == 1
+
+
+def test_team_tendencies_picked_by_does_not_double_count():
+    # Token resolves to the tag and picked_by names the team: counted once, not two.
+    rows = [_pick_row(1, "PRX", "Bind", picked_by_name="Paper Rex")]
+    out = team_tendencies(rows, "PRX", team_name="Paper Rex")
+    assert out["Bind"]["picks"] == 1
+
+
+def test_team_tendencies_picked_by_other_team_not_counted():
+    # picked_by names the opponent, so it is not this team's pick.
+    rows = [_pick_row(1, "garbage", "Bind", picked_by_name="LEVIATÁN")]
+    out = team_tendencies(rows, "PRX", team_name="Paper Rex")
+    assert out["Bind"]["picks"] == 0
+
+
+def test_team_tendencies_without_team_name_is_token_only():
+    # No team_name given: pick attribution is token-only, the prior behavior.
+    rows = [_pick_row(1, "garbage", "Bind", picked_by_name="Paper Rex")]
+    out = team_tendencies(rows, "PRX")
+    assert out["Bind"]["picks"] == 0
+
+
 def test_team_tendencies_tracks_last_seen():
     rows = [
         {"match_id": 1, "team_token": "PRX", "action": "pick",

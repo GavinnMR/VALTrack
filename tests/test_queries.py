@@ -143,14 +143,46 @@ def test_team_compositions_reads_agents_and_winner(tmp_path):
     conn.close()
 
 
-def test_team_clutches_reads_counts(tmp_path):
-    from valtrack.queries import team_clutches
-    from valtrack.stats import clutch_stats
+def test_team_performance_reads_counts(tmp_path):
+    from valtrack.queries import team_performance
+    from valtrack.stats import clutch_stats, multikill_stats, utility_stats
 
     conn = _fresh_conn(tmp_path)
     _seed_detail_match(conn)
-    out = clutch_stats(team_clutches(conn, 1), "Alpha")
-    assert out["won"] == 4 and out["total"] == 6   # two players, 2 won / 1 lost each
+    for name in ("a1", "a2"):
+        conn.execute(
+            "INSERT INTO match_player_perf (match_id, player_name, team_name, "
+            "mk_2k, mk_3k, mk_4k, mk_5k, clutch_1v1, clutch_1v2, clutch_1v3, "
+            "clutch_1v4, clutch_1v5, plants, defuses) "
+            "VALUES (1, ?, 'Alpha', 5, 1, 0, 0, 2, 1, 0, 0, 0, 4, 1)",
+            (name,),
+        )
+    conn.commit()
+    rows = team_performance(conn, 1)
+    # Two players, each 3 clutch wins (2 1v1 + 1 1v2) over the one match.
+    assert clutch_stats(rows, "Alpha")["won"] == 6
+    assert utility_stats(rows, "Alpha")["plants"] == 8
+    assert sum(p["total"] for p in multikill_stats(rows, "Alpha")) == 12
+    conn.close()
+
+
+def test_team_round_win_types_counts_by_side(tmp_path):
+    from valtrack.queries import team_round_win_types
+
+    conn = _fresh_conn(tmp_path)
+    _seed_detail_match(conn)
+    for side, wt in (("def", "defuse"), ("def", "elim"), ("atk", "boom"),
+                     ("atk", None)):
+        conn.execute(
+            "INSERT INTO rounds (match_id, map_name, round_number, winner_side, "
+            "winner_team, win_type) VALUES (1, 'Lotus', 1, ?, 'Alpha', ?)",
+            (side, wt),
+        )
+    conn.commit()
+    got = {(r["winner_side"], r["win_type"]): r["n"]
+           for r in team_round_win_types(conn, 1)}
+    # The null-win-type row is excluded; the rest are grouped by side and type.
+    assert got == {("def", "defuse"): 1, ("def", "elim"): 1, ("atk", "boom"): 1}
     conn.close()
 
 
@@ -170,8 +202,27 @@ def test_team_economy_empty_without_economy_rows(tmp_path):
 
     conn = _fresh_conn(tmp_path)
     _seed_detail_match(conn)
-    # The economy table stays empty (broken upstream), so the read is empty too.
+    # No map_economy rows seeded, so the read is honestly empty.
     assert team_economy(conn, 1) == []
+    conn.close()
+
+
+def test_team_economy_reads_aggregate_rows(tmp_path):
+    from valtrack.queries import team_economy
+    from valtrack.stats import economy_conversion
+
+    conn = _fresh_conn(tmp_path)
+    _seed_detail_match(conn)
+    for buy, played, won in (("eco", 5, 2), ("full", 10, 8)):
+        conn.execute(
+            "INSERT INTO map_economy (match_id, map_name, team_name, buy_type, "
+            "played, won) VALUES (1, 'Lotus', 'Alpha', ?, ?, ?)",
+            (buy, played, won),
+        )
+    conn.commit()
+    out = economy_conversion(team_economy(conn, 1), "Alpha")
+    assert out["eco"] == {"won": 2, "total": 5, "winrate": 0.4}
+    assert out["full"]["winrate"] == 0.8
     conn.close()
 
 

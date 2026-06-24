@@ -24,6 +24,7 @@ from valtrack.stats import (
     map_winrates,
     margin_profile,
     merge_player_aliases,
+    multikill_stats,
     opening_duels,
     partition_by_tier,
     per_map_splits,
@@ -35,9 +36,11 @@ from valtrack.stats import (
     pressure_stats,
     primary_role,
     rank_metric_gaps,
+    round_win_conditions,
     side_winrates,
     team_rating,
     tier_of_rank,
+    utility_stats,
     wilson_interval,
 )
 
@@ -914,36 +917,112 @@ def test_rank_metric_gaps_orders_by_absolute_gap_and_tags_leader():
 
 # --- economy conversion (item 1) --------------------------------------------
 
+def _econ(team, buy, played, won):
+    return {"team_name": team, "buy_type": buy, "played": played, "won": won}
+
+
 def test_economy_conversion_win_rate_per_buy_type():
+    # Aggregate buy-type rows (per map), summed across maps in the window.
     rows = [
-        {"team_name": "PRX", "buy_type": "eco", "outcome": "won"},
-        {"team_name": "PRX", "buy_type": "eco", "outcome": "lost"},
-        {"team_name": "PRX", "buy_type": "full", "outcome": "won"},
-        {"team_name": "EDG", "buy_type": "eco", "outcome": "won"},  # ignored
+        _econ("PRX", "eco", 2, 1),
+        _econ("PRX", "eco", 3, 2),     # eco totals: 5 played, 3 won
+        _econ("PRX", "full", 10, 8),
+        _econ("EDG", "eco", 4, 4),     # ignored
     ]
     out = economy_conversion(rows, "PRX")
-    assert out["eco"] == {"won": 1, "total": 2, "winrate": 0.5}
-    assert out["full"]["winrate"] == 1.0
+    assert out["eco"] == {"won": 3, "total": 5, "winrate": 0.6}
+    assert out["full"]["winrate"] == 0.8
     assert "EDG" not in str(out)
 
 
-# --- clutch stats (item 2) --------------------------------------------------
+def test_economy_conversion_handles_null_counts():
+    rows = [_econ("PRX", "eco", None, None), _econ("PRX", "eco", 2, 1)]
+    out = economy_conversion(rows, "PRX")
+    assert out["eco"] == {"won": 1, "total": 2, "winrate": 0.5}
 
-def test_clutch_stats_team_and_per_player():
+
+# --- clutch stats (item 2): won-only counts, no win rate ---------------------
+
+def _perf(name, team, **kw):
+    base = {"player_name": name, "team_name": team,
+            "mk_2k": 0, "mk_3k": 0, "mk_4k": 0, "mk_5k": 0,
+            "clutch_1v1": 0, "clutch_1v2": 0, "clutch_1v3": 0,
+            "clutch_1v4": 0, "clutch_1v5": 0, "plants": 0, "defuses": 0}
+    base.update(kw)
+    return base
+
+
+def test_clutch_stats_counts_wins_by_depth_no_rate():
     rows = [
-        {"player_name": "f0rsakeN", "team_name": "PRX",
-         "clutch_won": 2, "clutch_lost": 1},
-        {"player_name": "f0rsakeN", "team_name": "PRX",
-         "clutch_won": 1, "clutch_lost": 0},
-        {"player_name": "something", "team_name": "PRX",
-         "clutch_won": 0, "clutch_lost": None},
-        {"player_name": "x", "team_name": "EDG",
-         "clutch_won": 5, "clutch_lost": 0},  # ignored
+        _perf("f0rsakeN", "PRX", clutch_1v1=2, clutch_1v2=1),
+        _perf("f0rsakeN", "PRX", clutch_1v3=1),
+        _perf("something", "PRX", clutch_1v1=1),
+        _perf("x", "EDG", clutch_1v1=5),  # ignored
     ]
     out = clutch_stats(rows, "PRX")
-    assert out["won"] == 3 and out["total"] == 4
+    assert out["won"] == 5                       # 2+1+1 + 1
+    assert out["by_depth"] == {1: 3, 2: 1, 3: 1, 4: 0, 5: 0}
+    # Sorted by clutches won; no win rate is reported (attempts are unavailable).
     assert out["players"][0]["player_name"] == "f0rsakeN"
-    assert out["players"][0]["winrate"] == 0.75
+    assert out["players"][0]["won"] == 4
+    assert out["players"][0]["deepest"] == 3
+    assert "winrate" not in out and "winrate" not in out["players"][0]
+    assert "EDG" not in str(out)
+
+
+# --- multikills and utility (item: performance) -----------------------------
+
+def test_multikill_stats_orders_rarer_kills_first():
+    rows = [
+        _perf("a", "PRX", mk_2k=10, mk_3k=1),
+        _perf("a", "PRX", mk_2k=3, mk_4k=1),     # a: 13 2K, 1 3K, 1 4K
+        _perf("b", "PRX", mk_5k=1, mk_2k=1),     # b has the only ace
+        _perf("z", "EDG", mk_5k=9),              # ignored
+    ]
+    out = multikill_stats(rows, "PRX")
+    assert out[0]["player_name"] == "b"          # the 5K sorts first
+    a = next(p for p in out if p["player_name"] == "a")
+    assert (a["k2"], a["k3"], a["k4"], a["k5"]) == (13, 1, 1, 0)
+    assert a["total"] == 15
+    assert "EDG" not in str(out)
+
+
+def test_utility_stats_totals_and_per_player():
+    rows = [
+        _perf("controller", "PRX", plants=12, defuses=2),
+        _perf("controller", "PRX", plants=7, defuses=1),
+        _perf("duelist", "PRX", plants=0, defuses=3),
+        _perf("z", "EDG", plants=99, defuses=99),  # ignored
+    ]
+    out = utility_stats(rows, "PRX")
+    assert out["plants"] == 19 and out["defuses"] == 6
+    assert out["players"][0]["player_name"] == "controller"
+    assert out["players"][0]["plants"] == 19
+    assert "EDG" not in str(out)
+
+
+# --- round win conditions (item: round win-condition) -----------------------
+
+def test_round_win_conditions_split_by_side():
+    rows = [
+        {"winner_side": "def", "win_type": "defuse", "n": 4},
+        {"winner_side": "def", "win_type": "time", "n": 3},
+        {"winner_side": "atk", "win_type": "boom", "n": 5},
+        {"winner_side": "atk", "win_type": "elim", "n": 6},
+        {"winner_side": "def", "win_type": "elim", "n": 2},
+    ]
+    out = round_win_conditions(rows)
+    assert out["total"] == 20
+    assert out["by_type"]["elim"] == 8        # 6 atk + 2 def
+    assert out["by_side"]["def"]["defuse"] == 4
+    assert out["by_side"]["atk"]["boom"] == 5
+    assert out["by_side"]["atk"]["defuse"] == 0
+
+
+def test_round_win_conditions_empty():
+    out = round_win_conditions([])
+    assert out["total"] == 0
+    assert out["by_type"] == {"elim": 0, "defuse": 0, "time": 0, "boom": 0}
 
 
 # --- player-name dedup (item 7) ---------------------------------------------

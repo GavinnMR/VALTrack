@@ -129,6 +129,10 @@ CREATE TABLE IF NOT EXISTS map_results (
     team2_atk_rounds  INTEGER,
     team2_def_rounds  INTEGER,
     winner_name       TEXT,
+    -- Which team picked this map, resolved to the team name from the match
+    -- header's pick label (null for the decider, which neither side picks).
+    -- Used as a ground-truth cross-check for veto pick attribution.
+    picked_by_name    TEXT,
     fetched_at        TEXT,
     FOREIGN KEY (match_id) REFERENCES matches (match_id)
 );
@@ -163,9 +167,11 @@ CREATE TABLE IF NOT EXISTS map_player_stats (
     first_kills_def  INTEGER,
     first_deaths_atk INTEGER,
     first_deaths_def INTEGER,
-    -- Clutch (1vX) situations the player won and lost on the map. These need a
-    -- scraper extension to populate (VLR exposes clutches on the match page), so
-    -- they stay null until that lands; the clutch view reads them when present.
+    -- Legacy clutch columns. VLR's performance tab exposes clutches won (by 1vX
+    -- depth) only at series level, not per map, so these per-map columns are not
+    -- populated. The series-level performance figures live in match_player_perf
+    -- instead. Left in place so older databases do not need a destructive
+    -- migration.
     clutch_won   INTEGER,
     clutch_lost  INTEGER,
     fetched_at   TEXT,
@@ -174,6 +180,37 @@ CREATE TABLE IF NOT EXISTS map_player_stats (
 
 CREATE INDEX IF NOT EXISTS idx_map_player_stats_match ON map_player_stats (match_id);
 CREATE INDEX IF NOT EXISTS idx_map_player_stats_player ON map_player_stats (player_id);
+
+-- Per-player series-level performance from the match's performance tab. VLR only
+-- exposes multikills, clutches, plants, and defuses for the whole series (the
+-- per-map blocks carry the same totals), so this is one row per player per match,
+-- not per map. The columns are counts, never rates: clutches are wins by 1vX
+-- depth (attempts are not available), so a clutch win rate is deliberately not
+-- derived. Populated by the per-match pass and aggregated per player over a
+-- window in stats.clutch_stats / multikill_stats / utility_stats.
+CREATE TABLE IF NOT EXISTS match_player_perf (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    match_id     INTEGER NOT NULL,
+    player_id    INTEGER,
+    player_name  TEXT,
+    team_name    TEXT,
+    mk_2k        INTEGER,        -- rounds with exactly 2 kills
+    mk_3k        INTEGER,
+    mk_4k        INTEGER,
+    mk_5k        INTEGER,
+    clutch_1v1   INTEGER,        -- 1vX clutches won, by depth
+    clutch_1v2   INTEGER,
+    clutch_1v3   INTEGER,
+    clutch_1v4   INTEGER,
+    clutch_1v5   INTEGER,
+    plants       INTEGER,
+    defuses      INTEGER,
+    fetched_at   TEXT,
+    FOREIGN KEY (match_id) REFERENCES matches (match_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_match_player_perf_match ON match_player_perf (match_id);
+CREATE INDEX IF NOT EXISTS idx_match_player_perf_player ON match_player_perf (player_id);
 
 -- Round-by-round detail. Drives side win rates, pistol rates, and economy
 -- conversion in Build Steps 6 and 7.
@@ -192,11 +229,10 @@ CREATE TABLE IF NOT EXISTS rounds (
 
 CREATE INDEX IF NOT EXISTS idx_rounds_match ON rounds (match_id);
 
--- Per-round economy detail. Intended to drive eco and anti-eco conversion in
--- Build Step 7, but left empty for now: vlrggapi's match detail returns only the
--- first map's economy table for every map, so per-map economy is not reliably
--- available from the data source yet. Pistol-round win rate is computed from the
--- rounds table instead, which is reliable.
+-- Legacy per-round economy table. Never populated: VLR does not expose round-by
+-- round economy, only a per-team aggregate buy-type table. The aggregate table is
+-- stored in map_economy instead. Left in place so older databases do not need a
+-- destructive migration.
 CREATE TABLE IF NOT EXISTS economy (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     match_id     INTEGER NOT NULL,
@@ -211,6 +247,27 @@ CREATE TABLE IF NOT EXISTS economy (
 );
 
 CREATE INDEX IF NOT EXISTS idx_economy_match ON economy (match_id);
+
+-- Per-map, per-team economy as VLR actually reports it: an aggregate buy-type
+-- table, not round-by-round. Each row is one buy type for one team on one map,
+-- with how many rounds of that type were played and won. Buy types are eco (full
+-- save), light ($), half ($$), and full ($$$); pistols are excluded here because
+-- VLR gives only a won count for them and the rounds table already drives the
+-- pistol win rate. Drives eco conversion (the eco row's win rate) and the buy-type
+-- win-rate table, reported per buy type and never folded into one economy rating.
+CREATE TABLE IF NOT EXISTS map_economy (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    match_id     INTEGER NOT NULL,
+    map_name     TEXT,
+    team_name    TEXT,
+    buy_type     TEXT,            -- eco, light, half, full
+    played       INTEGER,
+    won          INTEGER,
+    fetched_at   TEXT,
+    FOREIGN KEY (match_id) REFERENCES matches (match_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_map_economy_match ON map_economy (match_id);
 
 -- Small key/value store for ingestion bookkeeping (last update time, last
 -- status). Used by the in-app refresh and staleness banner in Build Step 16.

@@ -3,7 +3,13 @@
 The encoding cases use the exact mojibake vlrggapi returned for real teams, so
 these assert the actual repair, not a synthetic stand-in.
 """
-from valtrack.cleaning import fix_encoding, parse_date, parse_int, parse_score
+from valtrack.cleaning import (
+    fix_encoding,
+    parse_date,
+    parse_int,
+    parse_played_won,
+    parse_score,
+)
 
 
 def _mojibake(original):
@@ -84,3 +90,20 @@ class TestParseInt:
         assert parse_int(None) is None
         assert parse_int("") is None
         assert parse_int("n/a") is None
+
+
+class TestParsePlayedWon:
+    def test_played_and_won(self):
+        assert parse_played_won("10 (8)") == (10, 8)
+        assert parse_played_won("0 (0)") == (0, 0)
+
+    def test_tab_padding(self):
+        # VLR cells can carry tab padding between the count and the parens.
+        assert parse_played_won("4\t\t\t(0)") == (4, 0)
+
+    def test_played_only_defaults_won_zero(self):
+        assert parse_played_won("3") == (3, 0)
+
+    def test_missing(self):
+        assert parse_played_won("") == (None, None)
+        assert parse_played_won(None) == (None, None)

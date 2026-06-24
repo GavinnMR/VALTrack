@@ -45,19 +45,38 @@ def _seed(path):
     )
     conn.execute(
         "INSERT INTO map_results (match_id, map_name, team1_name, team2_name, "
-        "team1_score, team2_score, winner_name) "
-        "VALUES (1, 'Ascent', 'Alpha', 'Beta', 13, 7, 'Alpha')"
+        "team1_score, team2_score, winner_name, picked_by_name) "
+        "VALUES (1, 'Ascent', 'Alpha', 'Beta', 13, 7, 'Alpha', 'Beta')"
     )
     rounds = [
-        (1, "atk", "Alpha", 1), (13, "def", "Beta", 1),
-        (2, "atk", "Alpha", 0), (14, "def", "Alpha", 0),
+        (1, "atk", "Alpha", 1, "elim"), (13, "def", "Beta", 1, "defuse"),
+        (2, "atk", "Alpha", 0, "boom"), (14, "def", "Alpha", 0, "time"),
     ]
-    for number, side, team, pistol in rounds:
+    for number, side, team, pistol, win_type in rounds:
         conn.execute(
             "INSERT INTO rounds (match_id, map_name, round_number, winner_side, "
-            "winner_team, is_pistol) VALUES (1, 'Ascent', ?, ?, ?, ?)",
-            (number, side, team, pistol),
+            "winner_team, is_pistol, win_type) VALUES (1, 'Ascent', ?, ?, ?, ?, ?)",
+            (number, side, team, pistol, win_type),
         )
+    # Series-level performance and per-map economy, so the clutch, multikill,
+    # utility, win-condition, and economy views render with data, not just their
+    # empty states.
+    for name, team in (("a1", "Alpha"), ("a2", "Alpha"), ("b1", "Beta"), ("b2", "Beta")):
+        conn.execute(
+            "INSERT INTO match_player_perf (match_id, player_name, team_name, "
+            "mk_2k, mk_3k, mk_4k, mk_5k, clutch_1v1, clutch_1v2, clutch_1v3, "
+            "clutch_1v4, clutch_1v5, plants, defuses) "
+            "VALUES (1, ?, ?, 4, 1, 0, 0, 1, 0, 0, 0, 0, 2, 1)",
+            (name, team),
+        )
+    for team in ("Alpha", "Beta"):
+        for buy, played, won in (("eco", 3, 1), ("light", 2, 0),
+                                 ("half", 4, 2), ("full", 8, 6)):
+            conn.execute(
+                "INSERT INTO map_economy (match_id, map_name, team_name, buy_type, "
+                "played, won) VALUES (1, 'Ascent', ?, ?, ?, ?)",
+                (team, buy, played, won),
+            )
     players = [
         ("a1", "Alpha", "Jett"), ("a2", "Alpha", "Sova"),
         ("b1", "Beta", "Raze"), ("b2", "Beta", "Omen"),

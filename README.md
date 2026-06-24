@@ -33,8 +33,10 @@ The detailed sections cover:
   sparkline), and earnings.
 - Per-map win rates with attack and defense side splits, pistol-round win rate,
   the win rate of the round right after a pistol (split by whether the pistol was
-  won or lost, a reliable proxy for economy conversion), and opening-duel win
-  rates at team and player level.
+  won or lost), eco and buy-type conversion (round win rate by buy type, from full
+  save through full buy), how rounds are won (elimination, defuse, time, or spike,
+  split by attack and defense side), and opening-duel win rates at team and player
+  level.
 - A round-margin profile alongside the record: the close-game record (maps decided
   by two rounds or fewer), the overtime record, and the average winning and losing
   margin, so two teams with the same win rate but opposite characters separate.
@@ -44,6 +46,10 @@ The detailed sections cover:
   figures, headshot percentage) with agent pools and per-agent performance, plus
   the per-map spread of each player's rating (a steady performer and a
   feast-or-famine one read differently), plus the same player lines split by map.
+- Per-player clutches won by 1vX depth, multikill counts (2K through 5K), and
+  plant and defuse counts, all reported as counts rather than rolled into a
+  rating (VLR exposes clutches won by situation, not attempts, so no clutch win
+  rate is invented).
 - Series pressure as separate figures: win rate on deciding maps, series win rate
   when a match reaches a decider, and comebacks after losing the opening map.
 - Recent form (a rolling recent window) beside the selected window with the gap,
@@ -54,6 +60,11 @@ The detailed sections cover:
   recent that sample is, a manual what-if mode that lets you drive the bans and
   picks yourself, and a map-pool overlap lens that marks where the two teams'
   strong maps collide or diverge.
+- A map-by-map breakdown that gathers, per likely-played map, both teams' record
+  and win rate, the cross-side duels (each team attacking against the other
+  defending), each team's sample recency, the most-run composition, and the
+  head-to-head on that map, so a veto can be reasoned one map at a time without
+  cross-referencing several sections.
 - A contextualized head-to-head, broken to the maps the two teams actually played
   against each other and how old the meetings are, with each past meeting
   annotated with its date, LAN versus online, the maps and scores, the lineup each
@@ -140,6 +151,25 @@ HTTP 429 (rate limited), raise the per-endpoint limits in
 `vlrggapi/api/utils/rate_limiter.py` to match a self-hosted instance; the client
 already paces itself politely toward VLR.gg.
 
+### Clone patches
+
+The vlrggapi clone is gitignored and not part of this repository, so a few small
+edits to it have to be re-applied after any fresh clone. They are all additive and
+contained to `vlrggapi/api/scrapers/match_detail.py` (plus the rate limit above),
+and each is marked in that file with a `VALTrack clone patch` comment:
+
+- per-side first kills and deaths (the attack/defense opening-duel split),
+- the round win-condition icon (elimination, defuse, time, or spike),
+- which team picked each map (the pick label only reads "PICK"; the team is in its
+  CSS class),
+- per-map economy: select each map's own economy block by game id instead of the
+  first map's table for every map,
+- strip the team tag from the performance-tab player name so it matches the plain
+  alias used elsewhere.
+
+Without these the app still runs, but the affected figures (opening duels,
+economy, round win conditions, and the veto pick cross-check) stay empty.
+
 ## First-time data harvest
 
 This is a one-time load, run from the terminal, not the app. It has two passes.
@@ -197,7 +227,9 @@ Run the tests with the VALTrack environment:
 ```
 
 The aggregation logic (side splits, pistol and opening-duel rates, player
-aggregates and the per-map split, series pressure, map-pool overlap, and veto
-reconstruction) is unit tested, since an error there would quietly corrupt the
-comparison. A hermetic test also boots the app against a small seeded database
-and exercises the views and toggles. The UI itself is verified by hand.
+aggregates and the per-map split, series pressure, map-pool overlap, veto
+reconstruction including the picked-by cross-check, buy-type economy conversion,
+clutch and multikill and plant/defuse counts, and round win conditions) is unit
+tested, since an error there would quietly corrupt the comparison. A hermetic test
+also boots the app against a small seeded database and exercises the views and
+toggles. The UI itself is verified by hand.

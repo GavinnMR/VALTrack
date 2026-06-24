@@ -77,6 +77,26 @@ def parse_float(value):
     return float(match.group()) if match else None
 
 
+def parse_played_won(value):
+    """Split a VLR economy cell like "10 (8)" into (played, won) integers.
+
+    The economy table reports each buy type as the count of rounds played with a
+    won count in parentheses. Returns (played, won), with won defaulting to 0 when
+    only a played count is present, and (None, None) when there is no leading
+    number, so a blank cell never becomes a misleading zero-of-zero.
+    """
+    if value is None:
+        return (None, None)
+    text = str(value)
+    played_match = re.search(r"-?\d+", text)
+    if not played_match:
+        return (None, None)
+    played = int(played_match.group())
+    won_match = re.search(r"\((\d+)\)", text)
+    won = int(won_match.group(1)) if won_match else 0
+    return (played, won)
+
+
 def side_to_phase(side):
     """Map a VLR round side code to attack or defense.
 

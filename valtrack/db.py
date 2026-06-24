@@ -31,6 +31,7 @@ _ADDED_COLUMNS = [
     ("map_player_stats", "first_deaths_def", "INTEGER"),
     ("map_player_stats", "clutch_won", "INTEGER"),
     ("map_player_stats", "clutch_lost", "INTEGER"),
+    ("map_results", "picked_by_name", "TEXT"),
     ("matchup_log", "outcome_side", "TEXT"),
     ("matchup_log", "predicted_side", "TEXT"),
 ]
@@ -116,6 +117,52 @@ CREATE TABLE IF NOT EXISTS matchup_upcoming (
 def ensure_app_tables(conn):
     """Create the local notes and matchup-log tables if missing. Idempotent."""
     conn.executescript(_APP_TABLES_SQL)
+    conn.commit()
+
+
+# Harvest-populated analytics tables added after the first schema shipped. The
+# harvest creates them through init_db, but the app does not run the full schema,
+# so it ensures these on startup too, the same way it ensures the app tables. Kept
+# in sync with schema.sql.
+_ANALYTICS_TABLES_SQL = """
+CREATE TABLE IF NOT EXISTS match_player_perf (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    match_id     INTEGER NOT NULL,
+    player_id    INTEGER,
+    player_name  TEXT,
+    team_name    TEXT,
+    mk_2k        INTEGER,
+    mk_3k        INTEGER,
+    mk_4k        INTEGER,
+    mk_5k        INTEGER,
+    clutch_1v1   INTEGER,
+    clutch_1v2   INTEGER,
+    clutch_1v3   INTEGER,
+    clutch_1v4   INTEGER,
+    clutch_1v5   INTEGER,
+    plants       INTEGER,
+    defuses      INTEGER,
+    fetched_at   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_match_player_perf_match ON match_player_perf (match_id);
+CREATE INDEX IF NOT EXISTS idx_match_player_perf_player ON match_player_perf (player_id);
+CREATE TABLE IF NOT EXISTS map_economy (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    match_id     INTEGER NOT NULL,
+    map_name     TEXT,
+    team_name    TEXT,
+    buy_type     TEXT,
+    played       INTEGER,
+    won          INTEGER,
+    fetched_at   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_map_economy_match ON map_economy (match_id);
+"""
+
+
+def ensure_analytics_tables(conn):
+    """Create the per-match performance and economy tables if missing. Idempotent."""
+    conn.executescript(_ANALYTICS_TABLES_SQL)
     conn.commit()
 
 

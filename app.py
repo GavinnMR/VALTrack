@@ -160,8 +160,13 @@ def cq_compositions(db_key, _conn, team_id, window, stage):
 
 
 @st.cache_data(show_spinner=False)
-def cq_clutches(db_key, _conn, team_id, window, stage):
-    return _dicts(queries.team_clutches(_conn, team_id, window, stage))
+def cq_performance(db_key, _conn, team_id, window, stage):
+    return _dicts(queries.team_performance(_conn, team_id, window, stage))
+
+
+@st.cache_data(show_spinner=False)
+def cq_win_types(db_key, _conn, team_id, window, stage):
+    return _dicts(queries.team_round_win_types(_conn, team_id, window, stage))
 
 
 @st.cache_data(show_spinner=False)
@@ -923,10 +928,10 @@ def render_veto_reconstruction(conn, team_a, team_b, window, stage):
     st.header("Veto and map-pool reconstruction")
     k = _db_key()
     a_tend = veto.team_tendencies(
-        cq_vetos(k, conn, team_a["id"], window), team_a["tag"]
+        cq_vetos(k, conn, team_a["id"], window), team_a["tag"], team_a["name"]
     )
     b_tend = veto.team_tendencies(
-        cq_vetos(k, conn, team_b["id"], window), team_b["tag"]
+        cq_vetos(k, conn, team_b["id"], window), team_b["tag"], team_b["name"]
     )
     pool = veto.active_pool(a_tend, b_tend)
     if not pool:
@@ -2048,10 +2053,9 @@ def render_overlap(conn, team_a, team_b, window, stage, pool):
 def render_economy(conn, team, window, stage):
     """Win rate by buy type, the eco and anti-eco conversion block (item 1).
 
-    Reads the stored round economy. The economy table is empty until the upstream
-    per-map economy scrape is fixed (it serves the first map's table for every
-    map), so this shows an honest unavailable state today; the aggregation is in
-    place and lights up when the data does. Reported per buy type, never one
+    Reads the stored per-map buy-type economy (the patched scrape gives each map
+    its own econ table). Shows an honest unavailable state when no detail with
+    economy is stored for the team in range. Reported per buy type, never one
     economy rating.
     """
     st.divider()
@@ -2060,63 +2064,155 @@ def render_economy(conn, team, window, stage):
         cq_economy(_db_key(), conn, team["id"], window, stage), team["name"]
     )
     if not eco:
-        st.caption(
-            "Economy data is not available. vlrggapi returns broken per-map "
-            "economy (the first map's table for every map), so eco and anti-eco "
-            "conversion are deferred until the upstream scrape is fixed. The "
-            "aggregation is in place and will populate when the data does."
-        )
+        st.caption(DETAIL_EMPTY)
         return
+    labels = {"eco": "Eco (full save)", "light": "Light buy ($)",
+              "half": "Half buy ($$)", "full": "Full buy ($$$)"}
     table = []
-    for bt in ("eco", "semi", "full", "bonus"):
+    for bt in ("eco", "light", "half", "full"):
         if bt not in eco:
             continue
         e = eco[bt]
-        table.append({"Buy type": bt, "Win%": pct_num(e["winrate"]),
-                      "Rounds": e["total"]})
+        flag = flag_if_small(e["total"], MIN_MAP_ROUNDS)
+        table.append({"Buy type": labels[bt] + flag, "Win%": pct_num(e["winrate"]),
+                      "Won": e["won"], "Rounds": e["total"]})
     st.dataframe(
         pd.DataFrame(table), hide_index=True,
         column_config={"Win%": st.column_config.NumberColumn(format="%.0f%%")},
     )
     st.caption(
-        "Round win rate by buy type. The eco row is the eco conversion (rounds "
-        "won when the team could not fully buy). Shown per buy type, never folded "
-        "into one economy rating."
+        "Round win rate by buy type, over the window. The eco row is the eco "
+        "conversion (rounds won when the team could not fully buy). Pistols are in "
+        f"the pistol section, not here; {FLAG} marks fewer than {MIN_MAP_ROUNDS} "
+        "rounds. Per buy type, never folded into one economy rating."
     )
 
 
 def render_clutch(conn, team, window, stage, five_names=None):
-    """Team and per-player clutch (1vX) record (item 2).
+    """Team and per-player clutch (1vX) wins, by depth (item 2).
 
-    Needs the clutch columns, which depend on a scraper extension to populate, so
-    this shows an honest unavailable state until they fill. Reported as counts and
-    a rate, never a clutch rating. Narrowed to the current five when five_names is
-    set.
+    Reads the series-level performance counts. VLR reports clutches won by
+    situation, not attempts, so this shows counts and the 1v1..1v5 spread and
+    never a clutch win rate. An honest unavailable state when no performance
+    detail is stored. Narrowed to the current five when five_names is set.
     """
     st.divider()
     st.subheader("Clutches (1vX)")
     rows = stats.keep_players(
-        cq_clutches(_db_key(), conn, team["id"], window, stage), five_names
+        cq_performance(_db_key(), conn, team["id"], window, stage), five_names
     )
     c = stats.clutch_stats(rows, team["name"])
-    if c["total"] == 0:
-        st.caption(
-            "Clutch data is not available yet. It needs a scraper extension to "
-            "capture 1vX situations from the match page (VLR exposes them, the "
-            "current scrape does not). The aggregation is in place and will "
-            "populate when the columns fill."
-        )
+    if c["won"] == 0:
+        st.caption(DETAIL_EMPTY)
         return
-    st.metric("Clutch win%", pct(c["winrate"]), help=f"{c['won']} of {c['total']}")
+    st.metric("Clutches won", c["won"],
+              help="1vX rounds the team closed out, all depths, over the window")
     table = [{
-        "Player": p["player_name"], "Won": p["won"], "Situations": p["total"],
-        "Win%": pct_num(p["winrate"]),
+        "Player": p["player_name"], "Clutches won": p["won"],
+        "1v1": p["by_depth"][1], "1v2": p["by_depth"][2], "1v3": p["by_depth"][3],
+        "1v4": p["by_depth"][4], "1v5": p["by_depth"][5],
     } for p in c["players"]]
-    st.dataframe(
-        pd.DataFrame(table), hide_index=True,
-        column_config={"Win%": st.column_config.NumberColumn(format="%.0f%%")},
+    st.dataframe(pd.DataFrame(table), hide_index=True)
+    st.caption(
+        "Clutches won by 1vX depth, per player, over the window. VLR reports wins "
+        "by situation only, not attempts, so this is counts and the depth spread, "
+        "never a clutch win rate. Series totals (VLR gives these per match, not "
+        "per map)."
     )
-    st.caption("Clutch situations won over those entered, per player. Counts, not a rating.")
+
+
+def render_multikills(conn, team, window, stage, five_names=None):
+    """Per-player multikill counts (2K..5K) over the window.
+
+    Separates a player who wins rounds in bursts from one whose fragging is spread
+    thin. Counts only, never a rating. Narrowed to the current five when set.
+    """
+    st.divider()
+    st.subheader("Multikills")
+    rows = stats.keep_players(
+        cq_performance(_db_key(), conn, team["id"], window, stage), five_names
+    )
+    mk = stats.multikill_stats(rows, team["name"])
+    if not mk or all(p["total"] == 0 for p in mk):
+        st.caption(DETAIL_EMPTY)
+        return
+    table = [{
+        "Player": p["player_name"], "2K": p["k2"], "3K": p["k3"],
+        "4K": p["k4"], "5K": p["k5"], "Total": p["total"],
+    } for p in mk]
+    st.dataframe(pd.DataFrame(table), hide_index=True)
+    st.caption(
+        "Rounds with N kills, per player, over the window, rarer kills first. "
+        "Series totals (VLR exposes multikills per match, not per map). Counts, "
+        "not a rating."
+    )
+
+
+def render_utility(conn, team, window, stage, five_names=None):
+    """Per-player plant and defuse counts over the window.
+
+    A hint at post-plant and retake roles. Counts only, never a rating. Narrowed
+    to the current five when five_names is set.
+    """
+    st.divider()
+    st.subheader("Plants and defuses")
+    rows = stats.keep_players(
+        cq_performance(_db_key(), conn, team["id"], window, stage), five_names
+    )
+    u = stats.utility_stats(rows, team["name"])
+    if u["plants"] == 0 and u["defuses"] == 0:
+        st.caption(DETAIL_EMPTY)
+        return
+    left, right = st.columns(2)
+    left.metric("Plants", u["plants"])
+    right.metric("Defuses", u["defuses"])
+    table = [{"Player": p["player_name"], "Plants": p["plants"],
+              "Defuses": p["defuses"]} for p in u["players"]]
+    st.dataframe(pd.DataFrame(table), hide_index=True)
+    st.caption(
+        "Spike plants and defuses, per player, over the window (series totals). "
+        "A hint at post-plant and retake tendencies, never a quality rating."
+    )
+
+
+def render_win_conditions(conn, team, window, stage):
+    """How a team's round wins are achieved, by condition and side.
+
+    Splits round wins into elimination, defuse, time, and spike, and by attack and
+    defense, so the user can read playstyle the side splits do not give (a defense
+    that wins by time or defuse plays differently from one that wins by
+    elimination). Descriptive counts, never a quality score. Needs detail
+    harvested with the patched round scraper, else an honest unavailable state.
+    """
+    st.divider()
+    st.subheader("Round win conditions")
+    wc = stats.round_win_conditions(
+        cq_win_types(_db_key(), conn, team["id"], window, stage))
+    if wc["total"] == 0:
+        st.caption(DETAIL_EMPTY)
+        return
+    labels = {"elim": "Elimination", "defuse": "Defuse", "time": "Time",
+              "boom": "Spike"}
+    rows = []
+    for t in ("elim", "defuse", "time", "boom"):
+        share = wc["by_type"][t] / wc["total"] if wc["total"] else None
+        rows.append({
+            "Condition": labels[t],
+            "ATK": wc["by_side"]["atk"][t],
+            "DEF": wc["by_side"]["def"][t],
+            "Total": wc["by_type"][t],
+            "Share%": pct_num(share),
+        })
+    st.dataframe(
+        pd.DataFrame(rows), hide_index=True,
+        column_config={"Share%": st.column_config.NumberColumn(format="%.0f%%")},
+    )
+    st.caption(
+        f"How {team['name']}'s {wc['total']} round wins with a known condition "
+        "were achieved, split by attack and defense side. Spike and most "
+        "eliminations come on attack; defuse and time are defense holds. Counts, "
+        "not a score."
+    )
 
 
 def render_compositions(conn, team, window, stage):
@@ -2390,10 +2486,13 @@ TEAM_SECTIONS = [
     "Compositions",
     "Pistol",
     "Economy",
+    "Win conditions",
     "Opening duels",
     "Player stats",
     "Player by map",
     "Clutches",
+    "Multikills",
+    "Plants and defuses",
     "Series pressure",
     "Recent vs window",
     "Roster timeline",
@@ -2437,6 +2536,8 @@ def render_team(conn, column, team, window, five_only, events, stage, sections,
             render_pistol(conn, team, window, stage)
         if on("Economy"):
             render_economy(conn, team, window, stage)
+        if on("Win conditions"):
+            render_win_conditions(conn, team, window, stage)
         if on("Opening duels"):
             render_opening(conn, team, window, stage, five_names)
         if on("Player stats"):
@@ -2445,6 +2546,10 @@ def render_team(conn, column, team, window, five_only, events, stage, sections,
             render_player_map_performance(conn, team, window, stage, five_names)
         if on("Clutches"):
             render_clutch(conn, team, window, stage, five_names)
+        if on("Multikills"):
+            render_multikills(conn, team, window, stage, five_names)
+        if on("Plants and defuses"):
+            render_utility(conn, team, window, stage, five_names)
         if on("Series pressure"):
             render_pressure(conn, team, window, stage)
         if on("Recent vs window"):
@@ -2465,8 +2570,10 @@ def _likely_pool(conn, team_a, team_b, window):
     maps, or None when there is no veto data in range.
     """
     k = _db_key()
-    a_tend = veto.team_tendencies(cq_vetos(k, conn, team_a["id"], window), team_a["tag"])
-    b_tend = veto.team_tendencies(cq_vetos(k, conn, team_b["id"], window), team_b["tag"])
+    a_tend = veto.team_tendencies(
+        cq_vetos(k, conn, team_a["id"], window), team_a["tag"], team_a["name"])
+    b_tend = veto.team_tendencies(
+        cq_vetos(k, conn, team_b["id"], window), team_b["tag"], team_b["name"])
     pool = veto.active_pool(a_tend, b_tend)
     if not pool:
         return None
@@ -2518,12 +2625,152 @@ def render_duel_board(conn, team_a, team_b, window, stage, pool=None):
             f"{a_tag} ATK", f"{b_tag} DEF", f"{b_tag} ATK", f"{a_tag} DEF",
             f"{a_tag} map%", f"{b_tag} map%")},
     )
+
+    # The cross-side duel as opposed bars, so a side mismatch is visible at a
+    # glance instead of decoded from four numbers in a row. Per duel pair the two
+    # bars sit adjacent (A attacking next to B defending, then the mirror), colored
+    # by team with the defending side hatched. The 50% line is the only reference;
+    # it deliberately does not call who wins the map.
+    chart = [d for d in board
+             if any(d[k] is not None
+                    for k in ("a_atk", "b_def", "b_atk", "a_def"))]
+    if chart:
+        names = [d["map"] for d in chart]
+        a_color, b_color = "#4c78a8", "#b279a2"
+
+        def duel_y(key):
+            return [100 * d[key] if d[key] is not None else None for d in chart]
+
+        fig = go.Figure()
+        fig.add_bar(name=f"{a_tag} ATK", x=names, y=duel_y("a_atk"),
+                    marker_color=a_color)
+        fig.add_bar(name=f"{b_tag} DEF", x=names, y=duel_y("b_def"),
+                    marker_color=b_color, marker_pattern_shape="/")
+        fig.add_bar(name=f"{b_tag} ATK", x=names, y=duel_y("b_atk"),
+                    marker_color=b_color)
+        fig.add_bar(name=f"{a_tag} DEF", x=names, y=duel_y("a_def"),
+                    marker_color=a_color, marker_pattern_shape="/")
+        fig.add_hline(y=50, line_dash="dot", line_color="gray", opacity=0.5)
+        fig.update_layout(
+            barmode="group", height=300,
+            margin=dict(l=0, r=0, t=10, b=0),
+            yaxis=dict(title="win %", range=[0, 100]),
+            legend=dict(orientation="h", y=1.15),
+        )
+        st.plotly_chart(fig, width="stretch",
+                        key=f"duelchart_{team_a['id']}_{team_b['id']}")
+
     st.caption(
         f"Each map as the side duel: {a_tag} attacking sits beside {b_tag} "
-        f"defending, then {b_tag} attacking beside {a_tag} defending. These are "
-        f"per-map, per-side win rates; {FLAG} marks fewer than {MIN_MAP_ROUNDS} "
-        "rounds across both teams. It does not call who wins the map."
+        f"defending, then {b_tag} attacking beside {a_tag} defending (the "
+        "defending side is hatched). These are per-map, per-side win rates; "
+        f"{FLAG} marks fewer than {MIN_MAP_ROUNDS} rounds across both teams. The "
+        "50% line is the only reference; it does not call who wins the map."
     )
+
+
+def render_map_breakdown(conn, team_a, team_b, window, events, stage):
+    """One block per likely map, assembling the whole per-map read in one place.
+
+    A veto is reasoned map by map, but the per-map picture is otherwise scattered
+    across the map splits, the duel board, the compositions, and the head-to-head.
+    This pulls them together per likely-played map: both teams' record and win
+    rate, the cross-side duels, each team's sample recency, each team's most-run
+    composition, and the head-to-head on that map. Descriptive per map throughout;
+    it never labels a map as one team's or calls who wins it.
+    """
+    st.divider()
+    st.header("Map-by-map breakdown")
+    k = _db_key()
+    a_splits = _team_map_splits(conn, team_a, window, stage)
+    b_splits = _team_map_splits(conn, team_b, window, stage)
+    if not a_splits and not b_splits:
+        st.caption(DETAIL_EMPTY)
+        return
+    pool = _likely_pool(conn, team_a, team_b, window)
+    if not pool:
+        pool = sorted(
+            set(a_splits) | set(b_splits),
+            key=lambda n: -((a_splits.get(n, {}).get("rounds_total", 0))
+                            + (b_splits.get(n, {}).get("rounds_total", 0))),
+        )[:5]
+    board = {d["map"]: d for d in stats.map_duel_board(a_splits, b_splits, pool)}
+    a_comps = stats.map_compositions(
+        cq_compositions(k, conn, team_a["id"], window, stage), team_a["name"])
+    b_comps = stats.map_compositions(
+        cq_compositions(k, conn, team_b["id"], window, stage), team_b["name"])
+    a_rec = _map_recency(conn, team_a, window, stage)
+    b_rec = _map_recency(conn, team_b, window, stage)
+    h2h = {r["map_name"]: r for r in
+           cq_h2h_maps(k, conn, team_a["id"], team_b["id"], window, events, stage)}
+    a_tag, b_tag = team_a["tag"] or "A", team_b["tag"] or "B"
+    st.caption(
+        "Each likely-played map in one place: record and win rate, the side "
+        "duels, sample freshness, the most-run composition, and the head-to-head. "
+        "Descriptive per map; it does not call who wins a map."
+    )
+
+    def top_comp(comps, m):
+        lst = comps.get(m)
+        if not lst:
+            return "not stored"
+        c = lst[0]
+        return f"{', '.join(c['agents'])} ({c['won']}-{c['played'] - c['won']})"
+
+    def recency_note(rec, m):
+        info = rec.get(m)
+        if not info or not info["maps"]:
+            return "no maps in range"
+        months = _months_ago(info["last"])
+        ago = f"{months}mo ago" if months is not None else "?"
+        return f"{info['maps']} maps, last {info['last']} ({ago})"
+
+    for m in pool:
+        d = board.get(m)
+        rounds = (d["a_rounds"] + d["b_rounds"]) if d else 0
+        flag = flag_if_small(rounds, MIN_MAP_ROUNDS)
+        with st.expander(f"{m}{flag}", expanded=(m == pool[0])):
+            c1, c2 = st.columns(2)
+            for col, team, splits, comps, rec in (
+                (c1, team_a, a_splits.get(m), a_comps, a_rec),
+                (c2, team_b, b_splits.get(m), b_comps, b_rec),
+            ):
+                with col:
+                    st.markdown(f"**{team['name']}**")
+                    if splits and (splits["won"] + splits["lost"]) > 0:
+                        st.metric("Map record",
+                                  f"{splits['won']}-{splits['lost']}",
+                                  help="decided maps in range")
+                        st.caption(
+                            f"Map win {pct(splits['map_winrate'])} · "
+                            f"ATK {pct(splits['atk_winrate'])} · "
+                            f"DEF {pct(splits['def_winrate'])}")
+                    else:
+                        st.caption("No decided maps here in range.")
+                    st.caption("Sample: " + recency_note(rec, m))
+                    st.caption("Most-run comp: " + top_comp(comps, m))
+            if d:
+                duel = pd.DataFrame([
+                    {"Side duel": f"{a_tag} attack", "Win%": pct_num(d["a_atk"]),
+                     "vs": f"{b_tag} defense", "Opp win%": pct_num(d["b_def"])},
+                    {"Side duel": f"{b_tag} attack", "Win%": pct_num(d["b_atk"]),
+                     "vs": f"{a_tag} defense", "Opp win%": pct_num(d["a_def"])},
+                ])
+                st.dataframe(
+                    duel, hide_index=True,
+                    column_config={
+                        "Win%": st.column_config.NumberColumn(format="%.0f%%"),
+                        "Opp win%": st.column_config.NumberColumn(format="%.0f%%"),
+                    },
+                )
+            hm = h2h.get(m)
+            if hm and hm["played"]:
+                st.caption(
+                    f"Head-to-head on {m}: {team_a['name']} {hm['a_wins']} - "
+                    f"{hm['b_wins']} {team_b['name']} over {hm['played']} "
+                    f"(last {hm['last_date']}).")
+            else:
+                st.caption(f"No head-to-head on {m} in this range.")
 
 
 def render_context_panel(conn, team_a, team_b, window, events, stage, upcoming=None):
@@ -2585,12 +2832,58 @@ def render_context_panel(conn, team_a, team_b, window, events, stage, upcoming=N
             st.warning(m)
 
 
-def render_gap_view(conn, team_a, team_b, window, events, stage, five_only):
+def _map_side_edges(conn, team_a, team_b, window, stage, pool):
+    """The biggest per-map and per-side gaps between two teams, for the gap view.
+
+    In this game the decisive edges are usually map-specific or side-specific, not
+    team-level, so the synthesis view would miss them with team rows alone. This
+    builds metric rows from the duel board (each team's map win rate, and the two
+    cross-side duels A-attack vs B-defense and A-defense vs B-attack) on the
+    likely-played maps. Small-sample maps are skipped so a noisy three-round map
+    cannot masquerade as the biggest difference. Returns rank_metric_gaps rows,
+    capped to the few largest, each "a" being team A's figure for a consistent
+    Leads column.
+    """
+    a_splits = _team_map_splits(conn, team_a, window, stage)
+    b_splits = _team_map_splits(conn, team_b, window, stage)
+    if not a_splits and not b_splits:
+        return []
+    if not pool:
+        pool = sorted(set(a_splits) | set(b_splits))
+    board = stats.map_duel_board(a_splits, b_splits, pool)
+    candidates = []
+    for d in board:
+        # Only judge a map where both teams have a real sample on it, so the edge
+        # is trustworthy rather than a small-sample artifact.
+        if d["a_rounds"] < MIN_MAP_ROUNDS or d["b_rounds"] < MIN_MAP_ROUNDS:
+            continue
+        m = d["map"]
+        if d["a_map"] is not None and d["b_map"] is not None:
+            candidates.append({"metric": f"Map% · {m}", "a": pct_num(d["a_map"]),
+                               "b": pct_num(d["b_map"]), "suffix": "%", "dec": 0})
+        if d["a_atk"] is not None and d["b_def"] is not None:
+            candidates.append({
+                "metric": f"{team_a['tag'] or 'A'} ATK vs {team_b['tag'] or 'B'} DEF · {m}",
+                "a": pct_num(d["a_atk"]), "b": pct_num(d["b_def"]),
+                "suffix": "%", "dec": 0})
+        if d["a_def"] is not None and d["b_atk"] is not None:
+            candidates.append({
+                "metric": f"{team_a['tag'] or 'A'} DEF vs {team_b['tag'] or 'B'} ATK · {m}",
+                "a": pct_num(d["a_def"]), "b": pct_num(d["b_atk"]),
+                "suffix": "%", "dec": 0})
+    ranked = stats.rank_metric_gaps(candidates)
+    return [r for r in ranked if r["abs_gap"] is not None][:6]
+
+
+def render_gap_view(conn, team_a, team_b, window, events, stage, five_only,
+                    pool=None):
     """Comparable headline figures sorted by the size of the gap (item 24).
 
     The read a predictor assembles by hand: the rows where the teams differ most
     on top, the near-ties at the bottom, each tagged with which side leads that
-    one row. The hard line: this sorts per-statistic differences and marks the
+    one row. Team-level figures (win, pistol, opening, rating) are joined by the
+    largest per-map and per-side edges, since those are usually where a matchup is
+    decided. The hard line: this sorts per-statistic differences and marks the
     per-row leader. It never counts how many rows a team leads or calls a winner.
     """
     st.subheader("Biggest differences")
@@ -2608,6 +2901,9 @@ def render_gap_view(conn, team_a, team_b, window, events, stage, five_only):
         {"metric": "Team rating", "a": a["rating"], "b": b["rating"], "suffix": "",
          "dec": 2},
     ]
+    # The largest map and side edges, already ranked and capped, mixed in with the
+    # team-level rows and re-sorted by gap size.
+    metrics.extend(_map_side_edges(conn, team_a, team_b, window, stage, pool))
     ranked = stats.rank_metric_gaps(metrics)
     rows = []
     for r in ranked:
@@ -2625,9 +2921,11 @@ def render_gap_view(conn, team_a, team_b, window, events, stage, five_only):
     st.dataframe(pd.DataFrame(rows), hide_index=True)
     st.caption(
         "Sorted by the size of the gap, biggest first, so what separates the "
-        "teams sits on top and the near-ties at the bottom. The Leads column "
-        "marks which team is higher on that one row; it is not a tally and never "
-        "counts who leads more rows or calls a match winner."
+        "teams sits on top and the near-ties at the bottom. Team-level figures sit "
+        "alongside the largest map and side edges (cross-side duels on the likely "
+        f"maps, over a real sample of at least {MIN_MAP_ROUNDS} rounds). The Leads "
+        "column marks which team is higher on that one row; it is not a tally and "
+        "never counts who leads more rows or calls a match winner."
     )
 
 
@@ -2792,7 +3090,8 @@ def render_prematch_dashboard(conn, team_a, team_b, window, events, stage, five_
     pool = _likely_pool(conn, team_a, team_b, dash_window)
     render_duel_board(conn, team_a, team_b, dash_window, stage, pool)
     st.divider()
-    render_gap_view(conn, team_a, team_b, dash_window, events, stage, five_only)
+    render_gap_view(
+        conn, team_a, team_b, dash_window, events, stage, five_only, pool)
 
 
 def render_favorites(conn, teams):
@@ -3040,6 +3339,7 @@ def main():
 
     conn = db.connect()
     db.ensure_app_tables(conn)
+    db.ensure_analytics_tables(conn)  # per-match performance and economy tables
     db.ensure_columns(conn)  # self-heal an older database missing newer columns
     db.backfill_match_stage(conn)  # classify any match missing a stage label
     try:
@@ -3220,6 +3520,13 @@ def main():
             render_glossary()
             st.divider()
             if view == "Aligned":
+                # Jump-to-section nav (item v4.4). Only the aligned view has unique
+                # subheader anchors; the side-by-side view duplicates them across
+                # the two columns, so the nav is shown for the aligned view only.
+                st.markdown(
+                    "Jump to: [Core figures](#core-figures-aligned) | "
+                    "[Map and side splits](#per-map-and-side-win-rates-aligned)"
+                )
                 render_aligned(conn, team_a, team_b, window, events, stage, five_only)
             else:
                 sections = st.multiselect(
@@ -3237,11 +3544,13 @@ def main():
             # subheader from its text, so these links scroll to them.
             st.markdown(
                 "Jump to: [Veto](#veto-and-map-pool-reconstruction) | "
+                "[Map breakdown](#map-by-map-breakdown) | "
                 "[Head-to-head](#head-to-head) | "
                 "[Player vs player](#player-versus-player) | "
                 "[Common opponents](#common-opponents)"
             )
             render_veto_reconstruction(conn, team_a, team_b, window, stage)
+            render_map_breakdown(conn, team_a, team_b, window, events, stage)
             render_head_to_head(conn, team_a, team_b, window, events, stage)
             render_player_vs_player(conn, team_a, team_b, window, stage, five_only)
             render_common_opponents(conn, team_a, team_b, window, events, stage)

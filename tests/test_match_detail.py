@@ -25,12 +25,32 @@ def _segment():
         "map_vetos": "ALP ban Split; BRV ban Lotus; ALP pick Haven; "
                      "BRV pick Bind; Ascent remains",
         "teams": [
-            {"id": "1", "name": "Alpha", "score": "2"},
-            {"id": "2", "name": "Bravo", "score": "0"},
+            {"id": "1", "name": "Alpha", "tag": "ALP", "score": "2"},
+            {"id": "2", "name": "Bravo", "tag": "BRV", "score": "0"},
         ],
+        "performance": {
+            # The live table has no header row, so the parser yields numeric
+            # string keys; Aplayer mirrors that. Bplayer uses header labels to
+            # exercise the label path of the same parse.
+            "advanced_stats": [
+                {"player": "Aplayer", "1": "", "2": "5", "3": "1", "4": "0",
+                 "5": "0", "6": "2", "7": "1", "8": "0", "9": "0", "10": "0",
+                 "11": "55", "12": "3", "13": "1"},
+                {"player": "Bplayer", "2K": "4", "3K": "0", "4K": "1", "5K": "0",
+                 "1v1": "1", "1v2": "0", "1v3": "0", "1v4": "0", "1v5": "0",
+                 "ECON": "50", "PL": "2", "DE": "0"},
+            ],
+        },
         "maps": [
             {
                 "map_name": "Haven",
+                "picked_by_team": "team1",
+                "economy": [
+                    {"0": "ALP", "1": "1", "2": "2 (1)", "3": "0 (0)",
+                     "4": "1 (1)", "5": "6 (5)"},
+                    {"0": "BRV", "1": "1", "2": "3 (1)", "3": "0 (0)",
+                     "4": "2 (0)", "5": "4 (1)"},
+                ],
                 "score": {"team1": 13, "team2": 7},
                 "score_ct": {"team1": "7", "team2": "4"},
                 "score_t": {"team1": "6", "team2": "3"},
@@ -52,14 +72,25 @@ def _segment():
                     }],
                 },
                 "rounds": [
-                    {"round_num": 1, "winner": "team1", "side": "t"},
-                    {"round_num": 2, "winner": "team2", "side": "ct"},
-                    {"round_num": 13, "winner": "team1", "side": "ct"},
-                    {"round_num": 25, "winner": "team2", "side": "t"},
+                    {"round_num": 1, "winner": "team1", "side": "t",
+                     "win_type": "elim"},
+                    {"round_num": 2, "winner": "team2", "side": "ct",
+                     "win_type": "defuse"},
+                    {"round_num": 13, "winner": "team1", "side": "ct",
+                     "win_type": "time"},
+                    {"round_num": 25, "winner": "team2", "side": "t",
+                     "win_type": "boom"},
                 ],
             },
             {
                 "map_name": "Bind",
+                "picked_by_team": "team2",
+                "economy": [
+                    {"0": "ALP", "1": "0", "2": "4 (1)", "3": "1 (0)",
+                     "4": "2 (1)", "5": "5 (3)"},
+                    {"0": "BRV", "1": "2", "2": "2 (2)", "3": "0 (0)",
+                     "4": "3 (2)", "5": "8 (6)"},
+                ],
                 "score": {"team1": 11, "team2": 13},
                 "score_ct": {"team1": "6", "team2": "7"},
                 "score_t": {"team1": "5", "team2": "6"},
@@ -163,7 +194,56 @@ def test_parse_rounds_side_winner_and_pistols():
     assert rounds[13]["winner_side"] == "def" and rounds[13]["is_pistol"] == 1
     # The overtime round is not a pistol even though it opens with low economy.
     assert rounds[25]["is_pistol"] == 0
-    assert all(r["win_type"] is None for r in haven["rounds"])
+
+
+def test_parse_rounds_win_type_kept_when_known():
+    haven = parse_match_detail(_segment())["maps"][0]
+    rounds = {r["round_number"]: r for r in haven["rounds"]}
+    assert rounds[1]["win_type"] == "elim"
+    assert rounds[2]["win_type"] == "defuse"
+    assert rounds[13]["win_type"] == "time"
+    assert rounds[25]["win_type"] == "boom"
+
+
+def test_parse_rounds_unknown_win_type_is_none():
+    seg = _segment()
+    seg["maps"][0]["rounds"][0]["win_type"] = "weird"
+    seg["maps"][0]["rounds"][1]["win_type"] = ""
+    rounds = {r["round_number"]: r
+              for r in parse_match_detail(seg)["maps"][0]["rounds"]}
+    assert rounds[1]["win_type"] is None and rounds[2]["win_type"] is None
+
+
+def test_parse_picked_by_name_resolves_team():
+    maps = parse_match_detail(_segment())["maps"]
+    assert maps[0]["picked_by_name"] == "Alpha"   # team1 picked Haven
+    assert maps[1]["picked_by_name"] == "Bravo"    # team2 picked Bind
+
+
+def test_parse_map_economy_resolves_tag_and_splits_played_won():
+    haven = parse_match_detail(_segment())["maps"][0]
+    econ = {(e["team_name"], e["buy_type"]): e for e in haven["economy"]}
+    # Tag ALP resolves to Alpha via the segment team tags.
+    assert econ[("Alpha", "full")] == {
+        "team_name": "Alpha", "buy_type": "full", "played": 6, "won": 5}
+    assert econ[("Alpha", "eco")]["played"] == 2 and econ[("Alpha", "eco")]["won"] == 1
+    assert econ[("Bravo", "full")]["won"] == 1
+    # Pistols (column 1) are not stored as a buy type here.
+    assert all(e["buy_type"] in ("eco", "light", "half", "full")
+               for e in haven["economy"])
+
+
+def test_parse_performance_counts_numeric_and_label_keys():
+    perf = {p["player_name"]: p for p in parse_match_detail(_segment())["performance"]}
+    # Aplayer used numeric keys, Bplayer used header labels; both parse the same.
+    a = perf["Aplayer"]
+    assert a["team_name"] == "Alpha"
+    assert a["mk_2k"] == 5 and a["mk_3k"] == 1
+    assert a["clutch_1v1"] == 2 and a["clutch_1v2"] == 1
+    assert a["plants"] == 3 and a["defuses"] == 1
+    b = perf["Bplayer"]
+    assert b["team_name"] == "Bravo"
+    assert b["mk_4k"] == 1 and b["clutch_1v1"] == 1 and b["plants"] == 2
 
 
 def test_parse_rounds_skips_winnerless_phantom_columns():
@@ -230,6 +310,9 @@ def test_store_writes_all_rich_tables(tmp_path):
     assert count("map_player_stats") == 4
     assert count("rounds") == 8
     assert count("match_vetos") == 5
+    # Two teams x four buy types x two maps; one performance row per player.
+    assert count("map_economy") == 16
+    assert count("match_player_perf") == 2
 
     row = conn.execute(
         "SELECT event_name, map_vetos_raw, details_fetched_at FROM matches "
@@ -238,6 +321,34 @@ def test_store_writes_all_rich_tables(tmp_path):
     assert row["event_name"] == "Test Event: Week 1"
     assert "Ascent remains" in row["map_vetos_raw"]
     assert row["details_fetched_at"] is not None
+
+    # picked_by_name and round win types land on the stored rows.
+    picks = {r["map_name"]: r["picked_by_name"] for r in conn.execute(
+        "SELECT map_name, picked_by_name FROM map_results").fetchall()}
+    assert picks == {"Haven": "Alpha", "Bind": "Bravo"}
+    haven_wt = conn.execute(
+        "SELECT win_type FROM rounds WHERE map_name='Haven' AND round_number=1"
+    ).fetchone()["win_type"]
+    assert haven_wt == "elim"
+    conn.close()
+
+
+def test_store_economy_and_perf_aggregate_correctly(tmp_path):
+    conn = _conn_with_match(tmp_path)
+    store_match_detail(conn, 9001, parse_match_detail(_segment()))
+    conn.commit()
+    # Alpha full buys across both maps: 6 + 5 played, 5 + 3 won.
+    row = conn.execute(
+        "SELECT SUM(played) p, SUM(won) w FROM map_economy "
+        "WHERE team_name='Alpha' AND buy_type='full'"
+    ).fetchone()
+    assert (row["p"], row["w"]) == (11, 8)
+    # Aplayer is a known roster player, so the perf row resolves the player id.
+    a = conn.execute(
+        "SELECT player_id, clutch_1v1, plants FROM match_player_perf "
+        "WHERE player_name='Aplayer'"
+    ).fetchone()
+    assert a["player_id"] == 99 and a["clutch_1v1"] == 2 and a["plants"] == 3
     conn.close()
 
 
@@ -287,4 +398,6 @@ def test_store_is_idempotent(tmp_path):
     assert count("map_player_stats") == 4
     assert count("rounds") == 8
     assert count("match_vetos") == 5
+    assert count("map_economy") == 16
+    assert count("match_player_perf") == 2
     conn.close()

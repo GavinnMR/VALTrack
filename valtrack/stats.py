@@ -912,19 +912,15 @@ def rank_metric_gaps(metrics):
 
 
 def economy_conversion(rows, team_name):
-    """Win rate by buy type for one team, from stored round economy.
+    """Win rate by buy type for one team, from stored aggregate economy.
 
-    Each row needs team_name, buy_type ("eco", "semi", "full", "bonus"), and
-    outcome ("won" / "lost"). Rows for the other team are ignored. Returns a dict
-    keyed by buy type, each value {won, total, winrate}. The eco bucket's win
-    rate is the eco conversion (how often a team wins a round it could not fully
-    buy); the figures are reported per buy type and never folded into one economy
-    rating.
-
-    The economy table is empty until the upstream per-map economy scrape is
-    fixed (it currently returns the first map's table for every map), so this
-    returns {} on real data today. The logic is in place and tested so it lights
-    up the moment the data does.
+    Each row needs team_name, buy_type ("eco", "light", "half", "full"), played,
+    and won (VLR's per-map buy-type table, summed over the window). Rows for the
+    other team are ignored. Returns a dict keyed by buy type, each value
+    {won, total, winrate} where total is rounds played of that type. The eco
+    bucket's win rate is the eco conversion (how often a team wins a round it
+    could not fully buy); the figures are reported per buy type and never folded
+    into one economy rating.
     """
     buckets = {}
     for row in rows:
@@ -934,9 +930,8 @@ def economy_conversion(rows, team_name):
         if not bt:
             continue
         agg = buckets.setdefault(bt, {"won": 0, "total": 0})
-        agg["total"] += 1
-        if row["outcome"] == "won":
-            agg["won"] += 1
+        agg["won"] += row["won"] or 0
+        agg["total"] += row["played"] or 0
     return {
         bt: {"won": agg["won"], "total": agg["total"],
              "winrate": _rate(agg["won"], agg["total"])}
@@ -945,40 +940,118 @@ def economy_conversion(rows, team_name):
 
 
 def clutch_stats(rows, team_name):
-    """Team and per-player clutch (1vX) record from stored clutch counts.
+    """Team and per-player clutch (1vX) wins from stored performance counts.
 
-    Each row needs player_name, team_name, and per-map clutch_won / clutch_lost
-    counts (1vX situations the player won or lost). Rows for the other team are
-    ignored; null counts are treated as zero. Returns the team totals
-    {won, total, winrate} plus a "players" list of the same shape per player,
-    sorted by clutch situations descending then name.
+    Each row needs player_name, team_name, and clutch_1v1..clutch_1v5: the 1vX
+    situations the player won, by depth. Rows for the other team are ignored; null
+    counts are treated as zero. Returns team totals {won, by_depth} plus a
+    "players" list (player_name, won, by_depth, deepest), sorted by clutches won
+    descending then name. by_depth is a dict keyed 1..5; deepest is the hardest
+    clutch the player closed, or 0 for none.
 
-    Reported as counts and a rate, never a "clutch rating". The clutch columns
-    depend on a scraper extension, so this returns zeros until that lands; the
-    aggregation is in place and tested so the view fills in when the data does.
+    VLR exposes clutches won by situation only, not attempts or losses, so this
+    reports won counts and the 1v1..1v5 distribution and deliberately derives no
+    clutch win rate (a rate needs attempts, which are not available). Counts, not
+    a rating.
     """
-    team = {"won": 0, "total": 0}
+    depths = (1, 2, 3, 4, 5)
+    team_by = {d: 0 for d in depths}
     per = {}
     for row in rows:
         if row["team_name"] != team_name:
             continue
-        won = row["clutch_won"] or 0
-        lost = row["clutch_lost"] or 0
-        agg = per.setdefault(row["player_name"], {"won": 0, "total": 0})
-        agg["won"] += won
-        agg["total"] += won + lost
-        team["won"] += won
-        team["total"] += won + lost
-    players = [
-        {"player_name": name, "won": a["won"], "total": a["total"],
-         "winrate": _rate(a["won"], a["total"])}
-        for name, a in per.items()
-    ]
-    players.sort(key=lambda p: (-p["total"], p["player_name"]))
-    return {
-        "won": team["won"], "total": team["total"],
-        "winrate": _rate(team["won"], team["total"]), "players": players,
-    }
+        agg = per.setdefault(row["player_name"], {d: 0 for d in depths})
+        for d in depths:
+            value = row[f"clutch_1v{d}"] or 0
+            agg[d] += value
+            team_by[d] += value
+    players = []
+    for name, by in per.items():
+        won = sum(by.values())
+        deepest = max((d for d in depths if by[d]), default=0)
+        players.append({"player_name": name, "won": won,
+                        "by_depth": dict(by), "deepest": deepest})
+    players.sort(key=lambda p: (-p["won"], p["player_name"]))
+    return {"won": sum(team_by.values()), "by_depth": team_by, "players": players}
+
+
+def multikill_stats(rows, team_name):
+    """Per-player multikill counts (2K..5K) for one team, from performance rows.
+
+    Each row needs player_name, team_name, and mk_2k..mk_5k. Rows for the other
+    team are ignored; null counts are treated as zero. Returns a per-player list
+    (player_name, k2, k3, k4, k5, total) sorted by the rarer kills first (5K, then
+    4K, 3K, 2K) so the standout rounds surface, then name. Counts that separate a
+    star who wins rounds in bursts from one whose fragging is spread thin, never a
+    rating.
+    """
+    per = {}
+    for row in rows:
+        if row["team_name"] != team_name:
+            continue
+        agg = per.setdefault(
+            row["player_name"], {"k2": 0, "k3": 0, "k4": 0, "k5": 0})
+        agg["k2"] += row["mk_2k"] or 0
+        agg["k3"] += row["mk_3k"] or 0
+        agg["k4"] += row["mk_4k"] or 0
+        agg["k5"] += row["mk_5k"] or 0
+    out = [{"player_name": name, **a,
+            "total": a["k2"] + a["k3"] + a["k4"] + a["k5"]}
+           for name, a in per.items()]
+    out.sort(key=lambda p: (-p["k5"], -p["k4"], -p["k3"], -p["k2"],
+                            p["player_name"]))
+    return out
+
+
+def utility_stats(rows, team_name):
+    """Per-player plant and defuse counts for one team, from performance rows.
+
+    Each row needs player_name, team_name, plants, and defuses. Rows for the other
+    team are ignored; null counts are treated as zero. Returns team totals
+    {plants, defuses} plus a "players" list (player_name, plants, defuses) sorted
+    by plants plus defuses descending then name. Counts that hint at post-plant and
+    retake roles, never a quality rating.
+    """
+    per = {}
+    total_plants = total_defuses = 0
+    for row in rows:
+        if row["team_name"] != team_name:
+            continue
+        agg = per.setdefault(row["player_name"], {"plants": 0, "defuses": 0})
+        agg["plants"] += row["plants"] or 0
+        agg["defuses"] += row["defuses"] or 0
+        total_plants += row["plants"] or 0
+        total_defuses += row["defuses"] or 0
+    players = [{"player_name": name, **a} for name, a in per.items()]
+    players.sort(key=lambda p: (-(p["plants"] + p["defuses"]), p["player_name"]))
+    return {"plants": total_plants, "defuses": total_defuses, "players": players}
+
+
+def round_win_conditions(rows):
+    """Aggregate a team's round wins by win condition and side.
+
+    `rows` are (winner_side, win_type, n) counts as team_round_win_types returns.
+    Returns {by_type, by_side, total}: total wins per condition (elim, defuse,
+    time, boom), the same split by attack and defense, and the overall total. It
+    shows how a team tends to close rounds (a defense winning by time or defuse
+    plays differently from one that wins by elimination), as descriptive counts,
+    never a quality score.
+    """
+    types = ("elim", "defuse", "time", "boom")
+    by_type = {t: 0 for t in types}
+    by_side = {"atk": {t: 0 for t in types}, "def": {t: 0 for t in types}}
+    total = 0
+    for row in rows:
+        win_type = row["win_type"]
+        if win_type not in by_type:
+            continue
+        n = row["n"] or 0
+        by_type[win_type] += n
+        side = row["winner_side"]
+        if side in by_side:
+            by_side[side][win_type] += n
+        total += n
+    return {"by_type": by_type, "by_side": by_side, "total": total}
 
 
 def canonical_player_name(name):

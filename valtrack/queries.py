@@ -385,15 +385,16 @@ def team_compositions(conn, team_id, window=None, stage=None):
     ).fetchall()
 
 
-def team_clutches(conn, team_id, window=None, stage=None):
-    """Per-player per-map clutch counts for this team, windowed.
+def team_performance(conn, team_id, window=None, stage=None):
+    """Per-player per-match series performance for this team, windowed.
 
-    One row per player per map: player_name, team_name, clutch_won, clutch_lost.
-    Feeds stats.clutch_stats. The columns are null until the scraper extension
-    that fills them lands, so this returns rows with null counts (treated as zero
-    by the aggregation) until then. The date filter is on the parent match and the
-    optional stage filter narrows to group or playoff play. Returns [] when the
-    team has no stored detail.
+    One row per player per match: player_name, team_name, the multikill counts
+    (mk_2k..mk_5k), the clutch-by-depth counts (clutch_1v1..clutch_1v5), plants,
+    and defuses. Feeds stats.clutch_stats, multikill_stats, and utility_stats.
+    VLR exposes these only at series level, so they are stored once per match, not
+    per map. The date filter is on the parent match and the optional stage filter
+    narrows to group or playoff play. Returns [] when the team has no stored
+    performance detail.
     """
     name = _team_name(conn, team_id)
     if name is None:
@@ -401,25 +402,29 @@ def team_clutches(conn, team_id, window=None, stage=None):
     scope, sparams = _scope(window, None, stage, "m.")
     return conn.execute(
         f"""
-        SELECT mps.player_name, mps.team_name, mps.clutch_won, mps.clutch_lost
-        FROM map_player_stats mps
-        JOIN matches m ON m.match_id = mps.match_id
-        WHERE mps.team_name = ?
+        SELECT mpp.player_name, mpp.team_name,
+               mpp.mk_2k, mpp.mk_3k, mpp.mk_4k, mpp.mk_5k,
+               mpp.clutch_1v1, mpp.clutch_1v2, mpp.clutch_1v3,
+               mpp.clutch_1v4, mpp.clutch_1v5, mpp.plants, mpp.defuses
+        FROM match_player_perf mpp
+        JOIN matches m ON m.match_id = mpp.match_id
+        WHERE mpp.team_name = ?
           AND {scope}
         """,
         [name, *sparams],
     ).fetchall()
 
 
-def team_economy(conn, team_id, window=None, stage=None):
-    """Per-round economy rows for this team's maps, windowed.
+def team_round_win_types(conn, team_id, window=None, stage=None):
+    """How this team's round wins were achieved, split by side, windowed.
 
-    One row per stored economy entry: team_name, buy_type, outcome. Feeds
-    stats.economy_conversion. The economy table is empty until the upstream
-    per-map economy scrape is fixed, so this returns [] on real data today; the
-    query and aggregation are in place so the view fills when the data does. The
-    date filter is on the parent match and the optional stage filter narrows to
-    group or playoff play.
+    One row per (winner_side, win_type) with a count, over rounds this team won
+    that carry a win condition (elim, defuse, time, boom). Older detail stored
+    before the scraper captured the icon has a null win_type and is excluded, so
+    the counts here are over rounds with a known condition only. Feeds the round
+    win-condition view. The date filter is on the parent match and the optional
+    stage filter narrows to group or playoff play. Returns [] when nothing is
+    stored with a win type.
     """
     name = _team_name(conn, team_id)
     if name is None:
@@ -427,10 +432,37 @@ def team_economy(conn, team_id, window=None, stage=None):
     scope, sparams = _scope(window, None, stage, "m.")
     return conn.execute(
         f"""
-        SELECT e.team_name, e.buy_type, e.outcome
-        FROM economy e
-        JOIN matches m ON m.match_id = e.match_id
-        WHERE e.team_name = ?
+        SELECT r.winner_side, r.win_type, COUNT(*) AS n
+        FROM rounds r
+        JOIN matches m ON m.match_id = r.match_id
+        WHERE r.winner_team = ?
+          AND r.win_type IS NOT NULL
+          AND {scope}
+        GROUP BY r.winner_side, r.win_type
+        """,
+        [name, *sparams],
+    ).fetchall()
+
+
+def team_economy(conn, team_id, window=None, stage=None):
+    """Per-map buy-type economy rows for this team, windowed.
+
+    One row per buy type per map: team_name, buy_type (eco, light, half, full),
+    played, and won. Feeds stats.economy_conversion. Reads the aggregate economy
+    table (map_economy); the date filter is on the parent match and the optional
+    stage filter narrows to group or playoff play. Returns [] when no economy
+    detail is stored for the team.
+    """
+    name = _team_name(conn, team_id)
+    if name is None:
+        return []
+    scope, sparams = _scope(window, None, stage, "m.")
+    return conn.execute(
+        f"""
+        SELECT me.team_name, me.buy_type, me.played, me.won
+        FROM map_economy me
+        JOIN matches m ON m.match_id = me.match_id
+        WHERE me.team_name = ?
           AND {scope}
         """,
         [name, *sparams],
@@ -516,12 +548,19 @@ def team_vetos(conn, team_id, window=None):
     """
     window = window or DateWindow.all_time()
     wclause, wparams = window.clause("m.date")
+    # The map a pick row names was actually played, so map_results carries which
+    # team picked it (picked_by_name). Attaching it lets the tendency aggregation
+    # fall back on that ground truth when the veto-string token does not resolve
+    # to a tag (accented or multi-word tags, junk in the field). A ban row's map
+    # was not played, so it has no match and picked_by_name is null, which is fine.
     return conn.execute(
         f"""
         SELECT v.match_id, v.seq, v.team_token, v.action, v.map_name,
-               m.date AS match_date
+               m.date AS match_date, mr.picked_by_name AS picked_by_name
         FROM match_vetos v
         JOIN matches m ON m.match_id = v.match_id
+        LEFT JOIN map_results mr
+          ON mr.match_id = v.match_id AND mr.map_name = v.map_name
         WHERE (m.team1_id = ? OR m.team2_id = ?)
           AND {wclause}
         ORDER BY v.match_id, v.seq

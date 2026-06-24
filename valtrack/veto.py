@@ -60,17 +60,25 @@ def _row_get(row, key):
         return None
 
 
-def team_tendencies(veto_rows, team_tag):
+def team_tendencies(veto_rows, team_tag, team_name=None):
     """Summarize one team's veto tendencies per map.
 
     `veto_rows` are stored veto actions for the team's matches, each with
-    match_id, team_token, action ("ban"/"pick"/"remains"), and map_name. Rows
+    match_id, team_token, action ("ban"/"pick"/"remains"), and map_name, and
+    optionally picked_by_name (which team actually picked a played map). Rows
     whose map is not a real Valorant map are skipped. For each remaining map:
 
       - appearances: distinct matches where the map was in the veto pool,
-      - bans / picks: times this team (matched by tag) banned or picked it,
+      - bans / picks: times this team banned or picked it,
       - ban_rate / pick_rate: those counts over appearances (None when the map
         never appeared, so a missing map is not reported as 0%).
+
+    A pick is attributed to this team when the veto-string token resolves to its
+    tag, or, as a fallback when team_name is given, when the map's picked_by_name
+    is this team. That ground-truth cross-check catches picks the token misses
+    (accented or multi-word tags, junk in the veto field). Bans have no such
+    ground truth, so they stay token-only. A pick is counted once even when both
+    signals agree.
 
     Using appearances as the denominator keeps rates honest across map rotations:
     a map only in the pool for part of the window is judged over the matches it
@@ -89,8 +97,17 @@ def team_tendencies(veto_rows, team_tag):
         if match_date and (agg["last_seen"] is None or match_date > agg["last_seen"]):
             agg["last_seen"] = match_date
         action = row["action"]
-        if action in ("ban", "pick") and _token_matches(row["team_token"], team_tag):
-            agg[action + "s"] += 1
+        token_hit = _token_matches(row["team_token"], team_tag)
+        if action == "ban":
+            if token_hit:
+                agg["bans"] += 1
+        elif action == "pick":
+            picked_hit = (
+                team_name is not None
+                and _row_get(row, "picked_by_name") == team_name
+            )
+            if token_hit or picked_hit:
+                agg["picks"] += 1
     out = {}
     for name, agg in maps.items():
         appearances = len(agg["matches"])
