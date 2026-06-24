@@ -1,4 +1,4 @@
-"""Rough Valorant era labels for the patch-era banner (Build Step 14).
+"""Rough Valorant era labels for the patch-era banner.
 
 The data carries no patch number, so the most honest thing is a rough reminder
 of which competitive era a date falls in. These labels are deliberately coarse

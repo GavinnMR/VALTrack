@@ -1,4 +1,4 @@
-"""Local-only reasoning aids: matchup notes and the matchup log (Build Step 15).
+"""Local-only reasoning aids: matchup notes and the matchup log.
 
 These hold the user's own observations, never anything scraped. A note is a free
 text field per team pair; the matchup log records a matchup with a pre-match note

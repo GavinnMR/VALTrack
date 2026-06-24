@@ -497,8 +497,8 @@ def player_aggregates(rows, team_name):
             "fk_per_round": _rate(acc["first_kills"], acc["rounds"]),
             "fd_per_round": _rate(acc["first_deaths"], acc["rounds"]),
             # Opening-duel win rate (first kills over opening duels) at player
-            # level, the same ratio Build Step 8 reports, kept here so the
-            # player-versus-player view in Build Step 10 can read it directly.
+            # level, the same ratio the team-level opening-duel split reports,
+            # kept here so the player-versus-player view can read it directly.
             "open_duels": acc["first_kills"] + acc["first_deaths"],
             "open_winrate": _rate(
                 acc["first_kills"], acc["first_kills"] + acc["first_deaths"]

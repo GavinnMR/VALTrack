@@ -1,8 +1,8 @@
 -- VALTrack SQLite schema.
 -- The whole data model is defined here up front, even though the cheap
--- list-level harvest in Build Step 2 only populates teams, players, rosters,
--- and matches. The richer tables (map results, per-map player stats, rounds,
--- economy) are filled by the expensive per-match pass in later steps.
+-- list-level harvest only populates teams, players, rosters, and matches. The
+-- richer tables (map results, per-map player stats, rounds, economy) are filled
+-- by the expensive per-match detail pass.
 
 -- Identity and roster context. id is the VLR.gg team id.
 CREATE TABLE IF NOT EXISTS teams (
@@ -49,8 +49,8 @@ CREATE TABLE IF NOT EXISTS rosters (
     FOREIGN KEY (player_id) REFERENCES players (id)
 );
 
--- Roster change history. Populated in Build Step 13. The transactions endpoint
--- is unreliable in the current vlrggapi version, so this stays empty for now.
+-- Roster change history. The transactions endpoint is unreliable in the current
+-- vlrggapi version, so this stays empty for now.
 CREATE TABLE IF NOT EXISTS roster_changes (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     team_id     INTEGER NOT NULL,
@@ -95,11 +95,11 @@ CREATE INDEX IF NOT EXISTS idx_matches_team2 ON matches (team2_id);
 CREATE INDEX IF NOT EXISTS idx_matches_date  ON matches (date);
 
 -- Parsed map veto sequence for a match, one row per action in order. Populated
--- by the per-match pass (Build Step 5) from the match's veto string, and
--- consumed by the veto and map-pool reconstruction (Build Step 11). The team is
--- stored as the abbreviation VLR puts in the veto string (eg "PRX"), which is
--- not always the team name, so Build Step 11 resolves it. A "remains" action
--- (the last map left after picks and bans) has no team.
+-- by the per-match pass from the match's veto string, and consumed by the veto
+-- and map-pool reconstruction. The team is stored as the abbreviation VLR puts
+-- in the veto string (eg "PRX"), which is not always the team name, so the veto
+-- reconstruction resolves it. A "remains" action (the last map left after picks
+-- and bans) has no team.
 CREATE TABLE IF NOT EXISTS match_vetos (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     match_id   INTEGER NOT NULL,
@@ -113,8 +113,8 @@ CREATE TABLE IF NOT EXISTS match_vetos (
 
 CREATE INDEX IF NOT EXISTS idx_match_vetos_match ON match_vetos (match_id);
 
--- Per-map results within a match. Populated by the per-match pass (Build Step 5)
--- and consumed by the side-split work (Build Step 6).
+-- Per-map results within a match. Populated by the per-match pass and consumed
+-- by the side-split work.
 CREATE TABLE IF NOT EXISTS map_results (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
     match_id          INTEGER NOT NULL,
@@ -139,8 +139,8 @@ CREATE TABLE IF NOT EXISTS map_results (
 
 CREATE INDEX IF NOT EXISTS idx_map_results_match ON map_results (match_id);
 
--- Per-map, per-player statistics. Populated in Build Step 5, aggregated in
--- Build Steps 8, 9, and 10.
+-- Per-map, per-player statistics. Populated by the per-match pass and aggregated
+-- into the opening-duel and per-player figures.
 CREATE TABLE IF NOT EXISTS map_player_stats (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     match_id     INTEGER NOT NULL,
@@ -160,7 +160,7 @@ CREATE TABLE IF NOT EXISTS map_player_stats (
     first_kills  INTEGER,
     first_deaths INTEGER,
     -- Per-side opening duels (attack = T side, defense = CT side), used for the
-    -- attack and defense opening-duel split in Build Step 8. VLR stores only
+    -- attack and defense opening-duel split. VLR stores only
     -- per-map per-player totals, not per-round first-blood events, so these are
     -- side totals rather than a round-by-round timeline.
     first_kills_atk  INTEGER,
@@ -213,7 +213,7 @@ CREATE INDEX IF NOT EXISTS idx_match_player_perf_match ON match_player_perf (mat
 CREATE INDEX IF NOT EXISTS idx_match_player_perf_player ON match_player_perf (player_id);
 
 -- Round-by-round detail. Drives side win rates, pistol rates, and economy
--- conversion in Build Steps 6 and 7.
+-- conversion.
 CREATE TABLE IF NOT EXISTS rounds (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     match_id     INTEGER NOT NULL,
@@ -270,13 +270,13 @@ CREATE TABLE IF NOT EXISTS map_economy (
 CREATE INDEX IF NOT EXISTS idx_map_economy_match ON map_economy (match_id);
 
 -- Small key/value store for ingestion bookkeeping (last update time, last
--- status). Used by the in-app refresh and staleness banner in Build Step 16.
+-- status). Used by the in-app refresh and staleness banner.
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT
 );
 
--- Local-only reasoning aids (Build Step 15). These hold the user's own input,
+-- Local-only reasoning aids. These hold the user's own input,
 -- never anything scraped, so they are not touched by ingestion. The app ensures
 -- they exist on startup, since it does not run the full schema.
 

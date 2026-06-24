@@ -1,7 +1,7 @@
 """Static Valorant agent to role reference.
 
 VLR does not expose a player's in-game role, only which agents they played. So
-the player-versus-player view (Build Step 10) infers a player's role from their
+the player-versus-player view infers a player's role from their
 agent usage, which needs this fixed agent to role table. This is plain reference
 data, like the franchise team list, kept in its own module.
 

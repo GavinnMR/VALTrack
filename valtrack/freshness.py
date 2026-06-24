@@ -1,4 +1,4 @@
-"""Data-freshness helper for the staleness banner (Build Step 16).
+"""Data-freshness helper for the staleness banner.
 
 The ingestion engine stamps a last_updated timestamp in the meta table on every
 run. This turns that timestamp into an age in days so the app can decide whether

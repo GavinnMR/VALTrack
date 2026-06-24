@@ -5,7 +5,7 @@ vlrggapi/
 CLAUDE.md
 BUILD_STEPS.md
 PROMPTS.txt
-IMPROVEMENTS.md
+improvements.md
 
 # generated local database
 *.db

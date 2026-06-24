@@ -1,6 +1,6 @@
 """Parse and store the expensive per-match detail.
 
-The cheap pass in Build Step 2 stored series-level match rows. This module takes
+The cheap pass stored series-level match rows. This module takes
 the per-match detail segment from vlrggapi and fills the rich tables that the
 splits, per-map figures, and player statistics depend on: map_results,
 map_player_stats, rounds, and match_vetos.
@@ -224,8 +224,8 @@ def _parse_map(map_obj, map_order, team1_name, team2_name, tag_to_name=None):
         "team1_score": team1_score,
         "team2_score": team2_score,
         # VLR reports each team's CT (defense) and T (attack) round totals. The
-        # authoritative side splits in Build Step 6 come from the rounds table;
-        # these columns are a convenient snapshot of VLR's half totals.
+        # authoritative side splits come from the rounds table; these columns are
+        # a convenient snapshot of VLR's half totals.
         "team1_atk_rounds": parse_int(score_t.get("team1")),
         "team1_def_rounds": parse_int(score_ct.get("team1")),
         "team2_atk_rounds": parse_int(score_t.get("team2")),

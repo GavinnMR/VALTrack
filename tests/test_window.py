@@ -64,7 +64,7 @@ def test_label():
     )
 
 
-# --- LAN / online event filter (Build Step 14) ------------------------------
+# --- LAN / online event filter ----------------------------------------------
 
 def test_is_lan_event_detects_international_markers():
     assert is_lan_event("Champions Tour 2024: Masters Madrid") is True

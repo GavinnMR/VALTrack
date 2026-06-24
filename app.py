@@ -1,4 +1,4 @@
-"""VALTrack: two-team comparison view with a shared date range (Build Step 4).
+"""VALTrack: two-team comparison view with a shared date range.
 
 Reads the stored teams, rosters, and matches from SQLite and shows two franchise
 teams side by side. A single date-range control drives both teams: the record,
@@ -1016,7 +1016,7 @@ def render_veto_reconstruction(conn, team_a, team_b, window, stage,
     Aggregates each team's veto tendencies over the window, infers the active map
     pool, and reconstructs the probable picks, decider, and bans. For the maps
     likely to be played it then surfaces each team's map win rate with attack and
-    defense side splits (from Build Step 6). This is built from veto history, not
+    defense side splits. This is built from veto history, not
     a real upcoming veto, and it makes no claim about who wins the match. When the
     current-pool filter is on, a map that has left rotation is dropped from the
     reconstruction; when off, it is still marked, so an all-time window does not
@@ -3416,7 +3416,7 @@ def render_sticky_header(team_a, team_b):
 def run_incremental_refresh():
     """Pull new matches since the last update and detail the newest of them.
 
-    Reuses the ingestion engine in incremental scope (Build Steps 2 and 5), so it
+    Reuses the ingestion engine in incremental scope, so it
     stops at matches already stored and never runs the full all-time harvest. The
     detail pass is capped so a click stays quick. The engine stamps last_updated
     and last_status itself; on an API failure it records "failed" and raises,

@@ -1,2 +1,0 @@
-# keep shell scripts as LF so they run inside the linux dev container
-*.sh text eol=lf

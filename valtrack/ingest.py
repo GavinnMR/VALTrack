@@ -2,9 +2,9 @@
 
 One engine, two scopes. A full run loads every franchise team's whole match
 history; an incremental run stops at the first already-stored match per team,
-since history comes back newest first. This step uses only the cheap endpoints:
+since history comes back newest first. This module uses only the cheap endpoints:
 rankings, team profile, and team match history. The expensive per-match detail
-pass lands in a later build step.
+pass is handled separately.
 
 Writes happen team by team and commit per team, so a failure partway through
 keeps the teams already loaded. Every write is an upsert keyed on the VLR id, so

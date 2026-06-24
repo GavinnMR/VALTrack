@@ -1,4 +1,4 @@
-"""Veto tendency aggregation and map-pool reconstruction (Build Step 11).
+"""Veto tendency aggregation and map-pool reconstruction.
 
 This is the flagship feature and the easiest to get subtly wrong, so the logic
 is kept pure and transparent here and tested against hand-built inputs.

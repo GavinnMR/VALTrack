@@ -145,7 +145,7 @@ def test_classify_realistic_mix_yields_five_mains():
     assert len(out["staff"]) == 3
 
 
-# --- per-map win rates and side splits (Build Step 6) -----------------------
+# --- per-map win rates and side splits --------------------------------------
 
 def _map(map_name, winner, t1="A", t2="B"):
     return {
@@ -262,7 +262,7 @@ def test_per_map_splits_merges_and_orders_by_decided_maps():
     assert sunset["atk_total"] == 0
 
 
-# --- pistol-round win rate (Build Step 7) -----------------------------------
+# --- pistol-round win rate --------------------------------------------------
 
 def _pistols(spec):
     """Expand a compact spec into pistol round rows.
@@ -340,7 +340,7 @@ def test_pistol_winrate_is_none_with_no_pistols():
     assert out["def_winrate"] is None
 
 
-# --- opening-duel win rate (Build Step 8) -----------------------------------
+# --- opening-duel win rate --------------------------------------------------
 
 def _duel(team, player, fk, fd, atk_fk, atk_fd, def_fk, def_fd):
     """One per-map opening-duel row, shaped like a map_player_stats row."""
@@ -424,7 +424,7 @@ def test_opening_duels_is_none_with_no_duels():
     assert out["players"] == []
 
 
-# --- aggregated player statistics (Build Step 9) ----------------------------
+# --- aggregated player statistics -------------------------------------------
 
 def _pstat(team, player, rounds, agent="Jett", rating=1.0, acs=200.0,
            kills=0, deaths=0, assists=0, kast="70%", adr=140.0, hs_pct="20%",
@@ -562,7 +562,7 @@ def test_player_aggregates_empty():
     assert player_aggregates([], "A") == []
 
 
-# --- player versus player: role inference and alignment (Build Step 10) ------
+# --- player versus player: role inference and alignment ----------------------
 
 def _agent(name, maps):
     return {"agent": name, "maps": maps}
@@ -635,7 +635,7 @@ def test_align_rosters_empty_both_sides():
     assert align_rosters([], []) == []
 
 
-# --- roster validity: current-five names and filtering (Build Step 13) -------
+# --- roster validity: current-five names and filtering -----------------------
 
 def test_current_five_names_are_mains_casefolded():
     rows = [

@@ -2,7 +2,7 @@
 
 The comparison runs over a user-chosen date range, all time by default. This is
 the one place that knows how a window turns into a SQL filter, so every derived
-statistic in later build steps shares it: build a DateWindow once, then AND its
+statistic shares it: build a DateWindow once, then AND its
 clause into whatever query reads from a dated table.
 
 A window is a pair of inclusive bounds, each optional. All time leaves both
