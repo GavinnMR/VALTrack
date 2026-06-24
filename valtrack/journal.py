@@ -9,11 +9,41 @@ machine.
 The tables are created by db.ensure_app_tables, which the app calls on startup,
 so these functions assume they exist.
 """
+import json
 from datetime import datetime, timezone
 
 
 def _now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def get_prefs(conn):
+    """The saved UI preferences as a dict, or empty when none are stored yet.
+
+    Preferences (the chosen window, palette, filters, and so on) are kept as one
+    JSON blob so a returning user does not re-set them every launch. A malformed
+    blob is treated as no preferences rather than raising, so a corrupt row never
+    blocks the app from opening.
+    """
+    row = conn.execute(
+        "SELECT value FROM app_prefs WHERE key = 'ui'").fetchone()
+    if not row or not row["value"]:
+        return {}
+    try:
+        data = json.loads(row["value"])
+        return data if isinstance(data, dict) else {}
+    except (ValueError, TypeError):
+        return {}
+
+
+def save_prefs(conn, prefs):
+    """Store the UI preferences dict, replacing any previous blob."""
+    conn.execute(
+        "INSERT INTO app_prefs (key, value) VALUES ('ui', ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (json.dumps(prefs),),
+    )
+    conn.commit()
 
 
 def pair_key(team_a_id, team_b_id):

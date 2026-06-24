@@ -66,8 +66,8 @@ def palette():
 
 # Shown wherever a section has no per-match detail in the selected range.
 DETAIL_EMPTY = (
-    "No per-map detail stored in this range. Run the detail harvest "
-    "(python harvest.py --pass details) to populate it."
+    "No per-map detail for this matchup in the selected range. Try widening the "
+    "date range; if this data was never collected, run the detail harvest."
 )
 
 
@@ -1772,6 +1772,31 @@ def team_headline(conn, team, window, events, stage, five_names=None):
     }
 
 
+def _style_gap_table(df, a_tag, b_tag, meta):
+    """Shade the leading team's cell and color the gap, the same cue as the aligned
+    core table, so any headline table reads at a glance.
+
+    meta is a per-row (leader_tag_or_None, numeric_gap_or_None). It is strictly a
+    per-row difference cue, never a tally across rows and never a winner call.
+    """
+    pal = palette()
+
+    def _style(row):
+        leader, gap = meta[row.name]
+        styles = {col: "" for col in row.index}
+        for col in (a_tag, b_tag, "Gap (A-B)"):
+            if col in styles:
+                styles[col] = "text-align:right"
+        if leader and leader in styles:
+            styles[leader] += f";background-color:{pal['lead']}"
+        if gap is not None and gap != 0 and "Gap (A-B)" in styles:
+            styles["Gap (A-B)"] += (
+                f";color:{pal['good'] if gap > 0 else pal['bad']}")
+        return pd.Series(styles)
+
+    return df.style.apply(_style, axis=1)
+
+
 def render_comparison_strip(conn, team_a, team_b, window, events, stage, five_only):
     """A compact aligned row of the headline numbers with the gap (item 2).
 
@@ -1786,20 +1811,23 @@ def render_comparison_strip(conn, team_a, team_b, window, events, stage, five_on
     b = team_headline(conn, team_b, window, events, stage, five_b)
     a_tag = team_a["tag"] or "A"
     b_tag = team_b["tag"] or "B"
-    rows = [
-        {"Metric": "Win %", a_tag: pct100(a["win"]), b_tag: pct100(b["win"]),
-         "Gap (A-B)": gap_str(a["win"], b["win"], "%")},
-        {"Metric": "Pistol %", a_tag: pct100(a["pistol"]),
-         b_tag: pct100(b["pistol"]),
-         "Gap (A-B)": gap_str(a["pistol"], b["pistol"], "%")},
-        {"Metric": "Opening-duel %", a_tag: pct100(a["opening"]),
-         b_tag: pct100(b["opening"]),
-         "Gap (A-B)": gap_str(a["opening"], b["opening"], "%")},
-        {"Metric": "Team rating", a_tag: num2(a["rating"]),
-         b_tag: num2(b["rating"]),
-         "Gap (A-B)": gap_str(a["rating"], b["rating"], "", 2)},
-    ]
-    st.dataframe(pd.DataFrame(rows), hide_index=True)
+    rows, meta = [], []
+    for label, key, suffix, dec in (
+        ("Win %", "win", "%", 0), ("Pistol %", "pistol", "%", 0),
+        ("Opening-duel %", "opening", "%", 0), ("Team rating", "rating", "", 2),
+    ):
+        av, bv = a[key], b[key]
+        fmt = pct100 if dec == 0 else num2
+        rows.append({
+            "Metric": label, a_tag: fmt(av), b_tag: fmt(bv),
+            "Gap (A-B)": gap_str(av, bv, suffix, dec),
+        })
+        leader = None
+        if av is not None and bv is not None and av != bv:
+            leader = a_tag if av > bv else b_tag
+        meta.append((leader, None if av is None or bv is None else av - bv))
+    st.dataframe(
+        _style_gap_table(pd.DataFrame(rows), a_tag, b_tag, meta), hide_index=True)
     st.caption(
         f"{team_a['name']}: {a['record']} ({a['decided']} decided)  |  "
         f"{team_b['name']}: {b['record']} ({b['decided']} decided). "
@@ -3072,13 +3100,19 @@ def render_gap_view(conn, team_a, team_b, window, events, stage, five_only,
     # team-level rows and re-sorted by gap size.
     metrics.extend(_map_side_edges(conn, team_a, team_b, window, stage, pool))
     ranked = stats.rank_metric_gaps(metrics)
-    rows = []
+    rows, meta = [], []
     any_noise = False
     for r in ranked:
         dec = r["dec"]
         fmt = pct100 if dec == 0 else num2
         leads = a_tag if r["leader"] == "a" else (
             b_tag if r["leader"] == "b" else "even")
+        # The same leader-shade and gap-color cue as the other headline tables.
+        leader_tag = a_tag if r["leader"] == "a" else (
+            b_tag if r["leader"] == "b" else None)
+        gap_num = (r["a"] - r["b"]) if (
+            r["a"] is not None and r["b"] is not None) else None
+        meta.append((leader_tag, gap_num))
         # When both sides carry a count, judge whether the gap is distinguishable
         # from noise by overlapping their Wilson bands. A blank cell means the row
         # has no count to build a band from (the rating, the map and side edges).
@@ -3098,7 +3132,8 @@ def render_gap_view(conn, team_a, team_b, window, events, stage, five_only,
             # distinguishable or the row carries no sample to band (rating, edges).
             "Within noise": "bands overlap" if overlap else "",
         })
-    st.dataframe(pd.DataFrame(rows), hide_index=True)
+    st.dataframe(
+        _style_gap_table(pd.DataFrame(rows), a_tag, b_tag, meta), hide_index=True)
     noise_note = (
         " A row tagged \"bands overlap\" has the two teams' 95% confidence bands "
         "crossing, so that gap is within sampling noise and should not be read as "
@@ -3666,13 +3701,70 @@ def _swap_teams():
     )
 
 
+# The display and filter choices remembered across sessions, so a returning user
+# does not re-set them every launch. Team picks are deliberately not persisted:
+# the pair is the per-visit task, not a standing preference.
+_PREF_KEYS = (
+    "dwmode", "env", "stage", "view", "five", "pool_only", "palette",
+    "leagues_filter",
+)
+
+
+def _apply_saved_prefs(conn, present):
+    """Seed the widget defaults from the saved preferences, once, before widgets.
+
+    Runs after the URL seeding so a shared link always wins, and uses setdefault
+    so a value the user already changed this session is never overwritten. Each
+    value is validated against its allowed options, so a stale or hand-edited
+    preference can never feed an invalid value into a widget. Returns the saved
+    dict (empty on a first run) so the caller can tell a new user from a returning
+    one.
+    """
+    saved = journal.get_prefs(conn)
+    if saved.get("dwmode") in WINDOW_MODES:
+        st.session_state.setdefault("dwmode", saved["dwmode"])
+    if saved.get("env") in ENV_MODES:
+        st.session_state.setdefault("env", saved["env"])
+    if saved.get("stage") in STAGE_MODES:
+        st.session_state.setdefault("stage", saved["stage"])
+    if saved.get("view") in VIEW_MODES:
+        st.session_state.setdefault("view", saved["view"])
+    if isinstance(saved.get("five"), bool):
+        st.session_state.setdefault("five", saved["five"])
+    if isinstance(saved.get("pool_only"), bool):
+        st.session_state.setdefault("pool_only", saved["pool_only"])
+    if saved.get("palette") in PALETTES:
+        st.session_state.setdefault("palette", saved["palette"])
+    lf = saved.get("leagues_filter")
+    if isinstance(lf, list) and lf and all(x in present for x in lf):
+        st.session_state.setdefault("leagues_filter", lf)
+    return saved
+
+
+def _save_prefs(conn, saved):
+    """Persist the current widget values, merged over the last saved set.
+
+    Merging over the previous blob keeps a preference whose widget was not drawn
+    this run (for example the view radio while a different page is active), so the
+    lazy-rendered pages do not clobber settings. Writes only when something
+    actually changed, to avoid a write on every rerun.
+    """
+    current = dict(saved)
+    for key in _PREF_KEYS:
+        if key in st.session_state:
+            current[key] = st.session_state[key]
+    current["seen_intro"] = True
+    if current != saved:
+        journal.save_prefs(conn, current)
+
+
 # The widget keys the reset control clears to return to the default view (item
 # 14). Clearing them and the URL drops the custom range, event filter,
 # current-five toggle, palette, section picker, and league filter back to default.
 _RESET_KEYS = (
     "team_a", "team_b", "dwmode", "dwrange", "env", "stage", "view", "five",
     "pool_only", "sections", "palette", "leagues_filter", "dash_recent",
-    "_url_seeded",
+    "active_page", "_url_seeded",
 )
 
 
@@ -3706,6 +3798,10 @@ def main():
             return
 
         _apply_url_state(teams)
+        # Restore last-used preferences (window, palette, filters) after the URL
+        # seeding, so a shared link wins but a returning user keeps their settings.
+        present = sorted({t["league"] for t in teams})
+        saved_prefs = _apply_saved_prefs(conn, present)
         # Seed the default pick in session_state (unless the URL already did), so
         # the selectboxes can rely on the key without also passing an index, which
         # would otherwise clash with the session_state seeding.
@@ -3724,7 +3820,6 @@ def main():
             # League filter for the pickers (item 10). The options stay indices
             # into the full team list so swap and the URL state are unaffected; a
             # pick outside the filter is snapped back to a valid option first.
-            present = sorted({t["league"] for t in teams})
             leagues = st.multiselect(
                 "Leagues", present, default=present, key="leagues_filter",
                 format_func=lambda lg: lg.capitalize(),
@@ -3866,6 +3961,15 @@ def main():
                 "wide range with care."
             )
 
+        # A one-time hint for a brand-new user, now that the controls moved to the
+        # sidebar. It shows only until the first preferences are saved (below).
+        if not saved_prefs.get("seen_intro"):
+            st.info(
+                "Pick two teams and set the date range and filters in the sidebar "
+                "on the left. The view below opens with the biggest differences "
+                "between the two teams; scroll for the detailed breakdowns."
+            )
+
         render_sticky_header(team_a, team_b)
         # The likely-played pool, computed once, so the map tables can mark the
         # relevant maps (item 20) consistently with the veto reconstruction.
@@ -3875,15 +3979,22 @@ def main():
         current_pool = set(cq_map_pool(_db_key(), conn))
 
         st.divider()
-        tab_dash, tab_teams, tab_matchup, tab_notes = st.tabs(
-            ["Pre-match", "Team comparison", "Matchup", "Notes and log"]
+        # A page selector instead of st.tabs, because tabs render every tab's body
+        # on every rerun; this renders only the active page, so a filter change
+        # recomputes one page instead of four. The tradeoff is a radio strip rather
+        # than native tab styling.
+        PAGES = ["Pre-match", "Team comparison", "Matchup", "Notes and log"]
+        page = st.radio(
+            "Page", PAGES, horizontal=True, key="active_page",
+            label_visibility="collapsed",
         )
-        with tab_dash:
+
+        if page == "Pre-match":
             render_upcoming_schedule(conn, teams)
             st.divider()
             render_prematch_dashboard(
                 conn, team_a, team_b, window, events, stage, five_only)
-        with tab_teams:
+        elif page == "Team comparison":
             # Lead with the answer: a quick visual of the headline gaps, then the
             # compact aligned strip, before the detailed sections below.
             render_headline_gap_bars(
@@ -3897,7 +4008,8 @@ def main():
                 "View", VIEW_MODES, horizontal=True, key="view",
                 help=(
                     "Aligned shows one shared table per stat with the gap between "
-                    "the teams. Side by side shows each team's full column."
+                    "the teams. Side by side shows each team's full column, with "
+                    "every section in a collapsible panel."
                 ),
             )
             if view == "Aligned":
@@ -3911,17 +4023,14 @@ def main():
                 render_aligned(conn, team_a, team_b, window, events, stage,
                                five_only, current_pool, pool_only)
             else:
-                sections = st.multiselect(
-                    "Sections to show", TEAM_SECTIONS, default=TEAM_SECTIONS,
-                    key="sections",
-                    help="Hide sections to focus the column on what you want.",
-                )
+                # The collapsible expanders inside each column are the section
+                # control now, so no separate "sections to show" picker is needed.
                 show_left, show_right = st.columns(2)
                 render_team(conn, show_left, team_a, window, five_only, events,
-                            stage, sections, highlight, current_pool, pool_only)
+                            stage, TEAM_SECTIONS, highlight, current_pool, pool_only)
                 render_team(conn, show_right, team_b, window, five_only, events,
-                            stage, sections, highlight, current_pool, pool_only)
-        with tab_matchup:
+                            stage, TEAM_SECTIONS, highlight, current_pool, pool_only)
+        elif page == "Matchup":
             # A small jump-to-section nav (item 16). Streamlit auto-anchors each
             # subheader from its text, so these links scroll to them.
             st.markdown(
@@ -3937,11 +4046,14 @@ def main():
             render_head_to_head(conn, team_a, team_b, window, events, stage)
             render_player_vs_player(conn, team_a, team_b, window, stage, five_only)
             render_common_opponents(conn, team_a, team_b, window, events, stage)
-        with tab_notes:
+        elif page == "Notes and log":
             st.subheader("Saved matchups")
             render_favorites(conn, teams)
             render_notes(conn, team_a, team_b)
             render_matchup_log(conn, team_a, team_b)
+
+        # Persist the current display and filter choices for the next session.
+        _save_prefs(conn, saved_prefs)
     finally:
         conn.close()
 

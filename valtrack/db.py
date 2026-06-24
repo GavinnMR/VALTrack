@@ -111,6 +111,10 @@ CREATE TABLE IF NOT EXISTS matchup_upcoming (
     is_lan      INTEGER,
     updated_at  TEXT
 );
+CREATE TABLE IF NOT EXISTS app_prefs (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+);
 """
 
 
