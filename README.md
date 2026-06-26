@@ -11,6 +11,10 @@ overall score, a rating, or a "winner" across categories. It shows the
 individual statistics and leaves the interpretation to you, and it surfaces the
 context that says when a number is thin or stale so the data does not mislead.
 
+New to the app? See the **[User Guide](USER_GUIDE.md)** for a plain-language
+walkthrough of how to use it. The rest of this README covers what VALTrack shows
+and how to set it up.
+
 ## What it shows
 
 All controls (the two team pickers, the date range, and the deeper filters) live
