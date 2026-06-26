@@ -1770,7 +1770,7 @@ def _style_gap_table(df, a_tag, b_tag, meta):
             if col in styles:
                 styles[col] = "text-align:right"
         if leader and leader in styles:
-            styles[leader] += f";background-color:{pal['lead']}"
+            styles[leader] += f";background-color:{pal['lead']};color:#0e1117"
         if gap is not None and gap != 0 and "Gap (A-B)" in styles:
             styles["Gap (A-B)"] += (
                 f";color:{pal['good'] if gap > 0 else pal['bad']}")
@@ -2422,7 +2422,7 @@ def render_aligned(conn, team_a, team_b, window, events, stage, five_only,
         for col in (a_tag, b_tag, "Gap (A-B)"):
             styles[col] = "text-align:right"   # align numbers (item 15)
         if leader:
-            styles[leader] += f";background-color:{pal['lead']}"
+            styles[leader] += f";background-color:{pal['lead']};color:#0e1117"
         if gap is not None and gap != 0:
             styles["Gap (A-B)"] += f";color:{pal['good'] if gap > 0 else pal['bad']}"
         # A thin sample is faded and italic so the eye slides past it. The value
