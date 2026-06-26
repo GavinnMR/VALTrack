@@ -1,0 +1,24 @@
+# Streamlit theme for VALTrack. Presentation only: colors, font, and corner
+# rounding so the comparison reads cleanly and the primary action buttons stand
+# out from the supporting ones. This file changes nothing about the data or the
+# computed statistics.
+
+[theme]
+base = "dark"
+primaryColor = "#2a9d8f"
+backgroundColor = "#0e1117"
+secondaryBackgroundColor = "#181d27"
+textColor = "#e8eaed"
+borderColor = "#2b323d"
+linkColor = "#56b6c2"
+font = "sans-serif"
+baseRadius = "0.6rem"
+buttonRadius = "0.5rem"
+showWidgetBorder = true
+
+# The sidebar holds the controls, so give it a slightly different background to
+# read as a distinct panel from the comparison in the main pane.
+[theme.sidebar]
+backgroundColor = "#141a23"
+secondaryBackgroundColor = "#1d2533"
+borderColor = "#2b323d"
