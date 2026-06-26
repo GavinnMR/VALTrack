@@ -13,18 +13,32 @@ context that says when a number is thin or stale so the data does not mislead.
 
 ## What it shows
 
-Two views of the same matchup, switchable at the top of the comparison:
+All controls (the two team pickers, the date range, and the deeper filters) live
+in the left sidebar. The comparison is organized into four pages, switched from a
+tab bar at the top:
 
-- **Side by side**: each team in its own column, with a selectable set of
-  sections so you can focus on maps, players, or veto without scrolling past the
-  rest.
-- **Aligned**: one shared table per statistic, with each team's value and the gap
-  between them, and maps in a single shared order so the rows line up.
+- **Compare**: the direct two-team view. It leads with the headline gaps and one
+  aligned table per statistic, then the full per-team detail below.
+- **Match prep**: a matchup-first briefing (each team's recent form, the things to
+  watch, the map duel board, and the biggest differences) for reading a game that
+  is about to happen.
+- **Maps and matchup**: the veto and map-pool reconstruction, the map-by-map
+  breakdown, the head-to-head, the player-versus-player view, and common opponents.
+- **My notes**: saved matchups, the free-text notes, and the personal matchup log.
 
-Either way, an at-a-glance strip up top collects the headline numbers (win rate,
-pistol rate, opening-duel rate, team rating) with the gap, and a per-team summary
-states how many matches and what date span back the figures, plus how many of
-them carry per-match detail.
+The Compare page offers two layouts, switchable with a toggle:
+
+- **Aligned** (default): one shared table per statistic, with each team's value and
+  the gap between them, and maps in a single shared order so the rows line up.
+- **Side by side**: each team in its own column, every section in a collapsible
+  panel so you can focus on maps, players, or veto without scrolling past the rest.
+
+A **How to read this** and a **Glossary** popover sit at the top of every page, so
+the conventions (the gap, the small-sample flag, a dash for unknown) and the
+definition of each statistic are always one click away. An at-a-glance strip
+collects the headline numbers (win rate, pistol rate, opening-duel rate, team
+rating) with the gap, and a per-team summary states how many matches and what date
+span back the figures, plus how many of them carry per-match detail.
 
 The detailed sections cover:
 
@@ -79,12 +93,12 @@ The detailed sections cover:
   came in.
 
 All tables sort numerically by column and show data bars where they help, the
-stat abbreviations carry tooltips and an inline glossary that describes how each
+stat abbreviations carry tooltips and a glossary popover that describes how each
 figure is actually computed, and the data-honesty aids stay throughout: sample
 sizes with small-sample flags (which also fade the unreliable cells in the aligned
 tables), a detail-coverage indicator, lineup continuity and a roster timeline with
 a current-five filter, rest and recent-load context, a LAN versus online toggle, a
-group versus playoff stage filter, a stale-data flag, and a rough patch-era banner.
+group versus playoff stage filter, a stale-data flag, and a rough patch-era badge.
 
 The two picks, the date range (all time, quick presets including a since-last-
 roster-change window, or a custom range), and the toggles are kept in the URL, so
